@@ -351,6 +351,10 @@
   .catalog-item:hover { background: #cbd5e1; }
   .catalog-item.selected { background: #d1fae5; border: 1px solid #059669; }
 
+  /* Modales secundarios (catálogos / plantillas) — quedan por encima del modal principal */
+  #modalRoot2 .modal-backdrop { z-index: 300; background: rgba(15,23,42,.65); }
+  #modalRoot2 .modal { max-height: calc(100vh - 20px); }
+
   /* ---------- Sync status ---------- */
   .sync-status {
     display: inline-flex; align-items: center; gap: 5px;
@@ -430,6 +434,7 @@
 </main>
 
 <div id="modalRoot"></div>
+<div id="modalRoot2"></div>
 
 <script>
 /* =========================================================
@@ -437,7 +442,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.1-fase2-catalogos-2026-05-09';
+const APP_VERSION = 'v3.2-fix-catalogos-modal-2026-05-09';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -1751,14 +1756,14 @@ service cloud.firestore {
     const existentes = new Set((p && p.diagnosticos) ? p.diagnosticos : []);
     const titulo = catalogo === 'diagnosticos' ? 'Agregar diagnóstico desde catálogo' : 'Agregar desde catálogo';
     const html = `
-      <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
+      <div class="modal-backdrop" onclick="if(event.target===this) App._closeSecondary()">
         <div class="modal" style="max-width:680px">
           <div class="modal-head">
             <div>
               <div style="font-weight:600">${titulo}</div>
-              <div style="font-size:.8rem;opacity:.9">Click en cada uno para agregar/quitar. Cierra cuando termines.</div>
+              <div style="font-size:.8rem;opacity:.9">Click en cada uno para agregar/quitar. "Listo" cuando termines.</div>
             </div>
-            <button class="close-x" onclick="App.closeModal()">✕</button>
+            <button class="close-x" onclick="App._closeSecondary()">✕</button>
           </div>
           <div class="modal-body">
             <input type="search" placeholder="Buscar..." oninput="App._filtrarCatalogoPicker(this.value)" style="margin-bottom:10px">
@@ -1775,12 +1780,12 @@ service cloud.firestore {
           <div class="modal-foot">
             <div class="muted" style="font-size:.85rem">${items.length} ${catalogo} en el catálogo</div>
             <div style="flex:1"></div>
-            <button class="btn ghost" onclick="App.closeModal()">Cerrar</button>
+            <button class="btn success" onclick="App._closeSecondary();App.renderModal('${pacienteId}')">✓ Listo</button>
           </div>
         </div>
       </div>
     `;
-    document.getElementById('modalRoot').innerHTML = html;
+    this._renderSecondary(html);
   },
 
   _filtrarCatalogoPicker(q) {
@@ -1813,14 +1818,14 @@ service cloud.firestore {
   openCatalogoPickerEntrada(catalogo, programaId, entradaId) {
     const items = getCatalogo(catalogo).slice().sort((a,b) => a.localeCompare(b, 'es'));
     const html = `
-      <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
+      <div class="modal-backdrop" onclick="if(event.target===this) App._closeSecondary()">
         <div class="modal" style="max-width:680px">
           <div class="modal-head">
             <div>
               <div style="font-weight:600">Insertar procedimiento desde catálogo</div>
               <div style="font-size:.8rem;opacity:.9">Click sobre uno para insertarlo.</div>
             </div>
-            <button class="close-x" onclick="App.closeModal()">✕</button>
+            <button class="close-x" onclick="App._closeSecondary()">✕</button>
           </div>
           <div class="modal-body">
             <input type="search" placeholder="Buscar..." oninput="App._filtrarCatalogoPicker(this.value)" style="margin-bottom:10px">
@@ -1835,12 +1840,12 @@ service cloud.firestore {
             </div>
           </div>
           <div class="modal-foot">
-            <button class="btn ghost" onclick="App.closeModal()">Cerrar</button>
+            <button class="btn ghost" onclick="App._closeSecondary()">Cerrar</button>
           </div>
         </div>
       </div>
     `;
-    document.getElementById('modalRoot').innerHTML = html;
+    this._renderSecondary(html);
   },
 
   _aplicarProcEntrada(programaId, entradaId, valor) {
@@ -1851,7 +1856,7 @@ service cloud.firestore {
     if (!e) return;
     e.procedimiento = valor;
     State.save();
-    this.closeModal();
+    this._closeSecondary();
     this.render();
   },
 
@@ -1859,14 +1864,14 @@ service cloud.firestore {
   openMedTemplatePicker(pacienteId) {
     const meds = getCatalogo('medicamentos');
     const html = `
-      <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
+      <div class="modal-backdrop" onclick="if(event.target===this) App._closeSecondary()">
         <div class="modal" style="max-width:700px">
           <div class="modal-head">
             <div>
               <div style="font-weight:600">Agregar medicamento desde plantilla</div>
               <div style="font-size:.8rem;opacity:.9">Click sobre uno y se agrega al paciente con dosis preconfigurada.</div>
             </div>
-            <button class="close-x" onclick="App.closeModal()">✕</button>
+            <button class="close-x" onclick="App._closeSecondary()">✕</button>
           </div>
           <div class="modal-body">
             <input type="search" placeholder="Buscar..." oninput="App._filtrarCatalogoPicker(this.value)" style="margin-bottom:10px">
@@ -1884,12 +1889,12 @@ service cloud.firestore {
             </div>
           </div>
           <div class="modal-foot">
-            <button class="btn ghost" onclick="App.closeModal()">Cerrar</button>
+            <button class="btn ghost" onclick="App._closeSecondary()">Cerrar</button>
           </div>
         </div>
       </div>
     `;
-    document.getElementById('modalRoot').innerHTML = html;
+    this._renderSecondary(html);
   },
 
   _aplicarMedPlantilla(pacienteId, idxPlantilla) {
@@ -1910,7 +1915,7 @@ service cloud.firestore {
     });
     logCambio(p, 'Medicamento', `Agregado desde plantilla: ${plantilla.nombre}`);
     State.save();
-    this.closeModal();
+    this._closeSecondary();
     this.renderModal(pacienteId);
   },
 
@@ -1918,14 +1923,14 @@ service cloud.firestore {
   openEsquemaPicker(egresoId, campo) {
     const esquemas = getCatalogo('esquemasEgreso');
     const html = `
-      <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
+      <div class="modal-backdrop" onclick="if(event.target===this) App._closeSecondary()">
         <div class="modal" style="max-width:700px">
           <div class="modal-head">
             <div>
               <div style="font-weight:600">Insertar esquema de egreso</div>
               <div style="font-size:.8rem;opacity:.9">Click sobre el esquema para agregarlo. Después puedes editar lo específico del paciente.</div>
             </div>
-            <button class="close-x" onclick="App.closeModal()">✕</button>
+            <button class="close-x" onclick="App._closeSecondary()">✕</button>
           </div>
           <div class="modal-body">
             ${esquemas.map((es, idx) => `
@@ -1938,12 +1943,12 @@ service cloud.firestore {
             ${esquemas.length === 0 ? '<div class="empty">No hay esquemas en el catálogo. Puedes agregarlos desde el engrane → Catálogos.</div>' : ''}
           </div>
           <div class="modal-foot">
-            <button class="btn ghost" onclick="App.closeModal()">Cerrar</button>
+            <button class="btn ghost" onclick="App._closeSecondary()">Cerrar</button>
           </div>
         </div>
       </div>
     `;
-    document.getElementById('modalRoot').innerHTML = html;
+    this._renderSecondary(html);
   },
 
   /* ---------- Administrador de catálogos ---------- */
@@ -2047,23 +2052,23 @@ service cloud.firestore {
     }
 
     const html = `
-      <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
+      <div class="modal-backdrop" onclick="if(event.target===this) App._closeSecondary()">
         <div class="modal" style="max-width:780px">
           <div class="modal-head">
             <div>
               <div style="font-weight:600">Administrar: ${titulos[catalogo]||catalogo}</div>
               <div style="font-size:.8rem;opacity:.9">${items.length} item(s) · cambios se sincronizan a todos los dispositivos</div>
             </div>
-            <button class="close-x" onclick="App.closeModal()">✕</button>
+            <button class="close-x" onclick="App._closeSecondary()">✕</button>
           </div>
           <div class="modal-body">${bodyHtml}</div>
           <div class="modal-foot">
-            <button class="btn ghost" onclick="App.closeModal()">Cerrar</button>
+            <button class="btn ghost" onclick="App._closeSecondary()">Cerrar</button>
           </div>
         </div>
       </div>
     `;
-    document.getElementById('modalRoot').innerHTML = html;
+    this._renderSecondary(html);
   },
 
   editarItemCatalogo(catalogo, idx, campo, valor) {
@@ -2132,7 +2137,7 @@ service cloud.firestore {
     eg[campo] = previo + (previo ? '\n\n' : '') + esquema.contenido;
     eg.modificado = new Date().toISOString();
     State.save();
-    this.closeModal();
+    this._closeSecondary();
     this.render();
   },
 
@@ -3881,6 +3886,14 @@ service cloud.firestore {
     this._currentModalId = null;
     document.getElementById('modalRoot').innerHTML = '';
     this.render();
+  },
+
+  /* Modales secundarios (catálogos, plantillas) que se abren ENCIMA del modal del paciente */
+  _renderSecondary(html) {
+    document.getElementById('modalRoot2').innerHTML = html;
+  },
+  _closeSecondary() {
+    document.getElementById('modalRoot2').innerHTML = '';
   },
 
   renderModal(id) {
