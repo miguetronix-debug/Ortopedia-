@@ -397,7 +397,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v1.5-programa-qx-2026-05-08';
+const APP_VERSION = 'v1.6-programas-diarios-2026-05-08';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -498,7 +498,7 @@ function nuevoPaciente() {
   };
 }
 
-// Devuelve el objeto programaQx de un paciente, con defaults si falta (para migrar pacientes viejos)
+// Devuelve el objeto programaQx de un paciente, con defaults si falta (legacy / pacientes viejos)
 function getProgramaQx(p) {
   if (!p.programaQx) {
     p.programaQx = {
@@ -508,6 +508,61 @@ function getProgramaQx(p) {
     };
   }
   return p.programaQx;
+}
+
+// Cirugía realizada del paciente (para post-op tracking)
+function getCirugia(p) {
+  if (!p.cirugia) {
+    p.cirugia = {
+      realizada:false, fecha:'', procedimiento:'', lateralidad:'',
+      cirujano:'', programaId:'', notas:''
+    };
+  }
+  return p.cirugia;
+}
+
+function nuevoPrograma(fecha) {
+  return {
+    id: 'prg_' + Date.now().toString(36) + Math.random().toString(36).slice(2,8),
+    fecha: fecha || todayISO(),
+    pacientes: [],
+    notas: '',
+    creado: new Date().toISOString(),
+    revisado: false
+  };
+}
+
+function nuevaEntradaPrograma(pacienteId, defaults) {
+  defaults = defaults || {};
+  return {
+    id: 'pe_' + Date.now().toString(36) + Math.random().toString(36).slice(2,8),
+    pacienteId,
+    procedimiento: defaults.procedimiento || '',
+    lateralidad: defaults.lateralidad || '',
+    insumos: defaults.insumos || '',
+    requerimientoSangre: defaults.requerimientoSangre || '',
+    medicoCargo: defaults.medicoCargo || '',
+    anestesia: defaults.anestesia || '',
+    observaciones: defaults.observaciones || '',
+    horaInicio: defaults.horaInicio || '',
+    operado: null,           // null = no revisado, true = sí, false = no
+    motivoNoOperado: ''
+  };
+}
+
+const fmtDateLong = (iso) => {
+  if (!iso) return '—';
+  const d = new Date(iso + (iso.length===10?'T00:00:00':''));
+  if (isNaN(d)) return iso;
+  return d.toLocaleDateString('es', { weekday:'long', day:'numeric', month:'long', year:'numeric' });
+};
+
+// Días postoperatorios. Si tiene fecha de egreso y la cirugía fue antes, cuenta hasta egreso.
+function diasPostop(p) {
+  const c = p.cirugia;
+  if (!c || !c.realizada || !c.fecha) return null;
+  const fin = (p.fechaEgreso && p.fechaEgreso >= c.fecha) ? p.fechaEgreso : null;
+  return daysBetween(c.fecha, fin);
 }
 
 /* ---------- Sincronización en la nube (Firebase Firestore) ---------- */
@@ -594,9 +649,10 @@ const Sync = {
           const remote = snap.exists ? snap.data() : null;
           if (remote && remote.patients) {
             const localStr = JSON.stringify(State.data);
-            const remoteStr = JSON.stringify({ patients: remote.patients, lastWrite: remote.lastWrite });
+            const remoteStr = JSON.stringify({ patients: remote.patients, programas: remote.programas || [], lastWrite: remote.lastWrite });
             if (localStr !== remoteStr) {
-              State.data = { patients: remote.patients, lastWrite: remote.lastWrite };
+              State.data = { patients: remote.patients, programas: remote.programas || [], lastWrite: remote.lastWrite };
+              State._migrar();
               try { localStorage.setItem(STORAGE_KEY, JSON.stringify(State.data)); } catch(e){}
               if (App.render) App.render();
               if (App._currentModalId && State.data.patients.some(p=>p.id===App._currentModalId)) {
@@ -642,6 +698,7 @@ const Sync = {
       this.ignoreNextRemote = true;
       const payload = {
         patients: State.data.patients || [],
+        programas: State.data.programas || [],
         lastWrite: Date.now()
       };
       State.data.lastWrite = payload.lastWrite;
@@ -672,6 +729,40 @@ const State = {
       if (raw) this.data = JSON.parse(raw);
     } catch(e) { console.warn('No se pudo cargar datos', e); }
     if (!this.data.patients) this.data.patients = [];
+    if (!this.data.programas) this.data.programas = [];
+    this._migrar();
+  },
+  // Migrar datos antiguos al nuevo formato
+  _migrar() {
+    const data = this.data;
+    data.patients.forEach(p => {
+      if (p.programaQx && p.programaQx.programado && !p._migratedToPrograma) {
+        const fecha = p.programaQx.fechaProgramada || todayISO();
+        let prog = data.programas.find(pg => pg.fecha === fecha);
+        if (!prog) {
+          prog = nuevoPrograma(fecha);
+          data.programas.push(prog);
+        }
+        if (!prog.pacientes.find(e => e.pacienteId === p.id)) {
+          const entrada = nuevaEntradaPrograma(p.id, p.programaQx);
+          // Estado realizado en legacy → marcar operado y mover a cirugia
+          if (p.programaQx.estado === 'realizado') {
+            entrada.operado = true;
+            getCirugia(p).realizada = true;
+            getCirugia(p).fecha = p.programaQx.fechaRealizado || fecha;
+            getCirugia(p).procedimiento = p.programaQx.procedimiento || '';
+            getCirugia(p).lateralidad = p.programaQx.lateralidad || '';
+            getCirugia(p).cirujano = p.programaQx.medicoCargo || p.cirujano || '';
+            getCirugia(p).programaId = prog.id;
+          } else if (p.programaQx.estado === 'suspendido') {
+            entrada.operado = false;
+            entrada.motivoNoOperado = 'Suspendido (migrado)';
+          }
+          prog.pacientes.push(entrada);
+        }
+        p._migratedToPrograma = true;
+      }
+    });
   },
   save() {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(this.data)); }
@@ -705,6 +796,10 @@ function tieneContraindicacion(p) {
  * Devuelve { listo: bool, motivo: string, faltantes: [strings] }
  */
 function evaluarAptoCirugia(p) {
+  // Si ya fue operado, ya no es candidato
+  if (p.cirugia && p.cirugia.realizada) {
+    return { listo:false, operado:true, motivo:'Ya operado el ' + fmtDate(p.cirugia.fecha), faltantes:[] };
+  }
   const edad = parseInt(p.edad, 10);
   const faltantes = [];
   if (!edad || isNaN(edad)) {
@@ -1137,16 +1232,20 @@ service cloud.firestore {
     const alertas = calcularAlertasPaciente(p);
     const tieneRoja = alertas.some(a=>a.tipo==='red');
     const tieneAmarilla = alertas.some(a=>a.tipo==='yellow');
+    const operado = p.cirugia && p.cirugia.realizada;
+    const dpostop = diasPostop(p);
     let cls = 'patient-card';
-    if (apto.listo && !tieneRoja) cls += ' ready';
+    if (operado && !tieneRoja) cls += ' ready';
+    else if (apto.listo && !tieneRoja) cls += ' ready';
     if (tieneRoja) cls += ' alert';
     else if (tieneAmarilla) cls += ' warn';
     if (p.fechaEgreso) cls += ' muted';
 
     const dxList = (p.diagnosticos || []).join(', ');
     const tagsHtml = [
-      apto.listo ? '<span class="tag green">Listo cirugía</span>' :
-        '<span class="tag red">Pendiente</span>',
+      operado ? `<span class="tag green">Operado · día ${dpostop} postop</span>` :
+        (apto.listo ? '<span class="tag green">Listo cirugía</span>' :
+          '<span class="tag red">Pendiente</span>'),
       tieneInfeccion(p) ? '<span class="tag yellow">Infección</span>' : '',
       p.fechaEgreso ? '<span class="tag gray">Egresado</span>' : ''
     ].filter(Boolean).join(' ');
@@ -1164,6 +1263,11 @@ service cloud.firestore {
             <div class="pc-meta" style="margin-top:4px">
               <strong>Dx:</strong> ${escapeHtml(dxList || '—')}
             </div>
+            ${operado?`<div class="pc-meta" style="margin-top:4px;color:#065f46">
+              <strong>Cirugía:</strong> ${escapeHtml(p.cirugia.procedimiento||'—')}
+              ${p.cirugia.lateralidad?' ('+escapeHtml(p.cirugia.lateralidad)+')':''}
+              · ${fmtDate(p.cirugia.fecha)} · ${dpostop} día(s) postop
+            </div>`:''}
             <div class="pc-tags">${tagsHtml}</div>
             ${alertas.filter(a=>a.tipo==='red').slice(0,1).map(a=>`
               <div class="alert-box red" style="margin-top:6px;font-size:.78rem;padding:6px 8px">⚠ ${escapeHtml(a.texto)}</div>
@@ -1251,64 +1355,192 @@ service cloud.firestore {
     return html;
   },
 
-  /* ---------- Programa quirúrgico ---------- */
+  /* ============================================================
+     PROGRAMA QUIRÚRGICO — múltiples programas por día con historial
+     ============================================================ */
+  _currentProgramaId: null,
+
   renderPrograma() {
-    const programados = State.data.patients
-      .filter(p => p.programaQx && p.programaQx.programado)
-      .sort((a,b) => {
-        const fa = a.programaQx.fechaProgramada || '9999-99-99';
-        const fb = b.programaQx.fechaProgramada || '9999-99-99';
-        if (fa !== fb) return fa.localeCompare(fb);
-        return (a.cama||'').localeCompare(b.cama||'', 'es', {numeric:true});
-      });
+    // Si hay un programa abierto, mostrar su detalle
+    if (this._currentProgramaId) {
+      return this.renderProgramaDia(this._currentProgramaId);
+    }
 
-    let html = `
-      <div class="print-only">
-        <div class="print-title">Programa Quirúrgico — Servicio de Ortopedia</div>
-        <div class="print-sub">${new Date().toLocaleString('es')} · ${programados.length} cirugía(s) programada(s)</div>
-      </div>
+    const programas = (State.data.programas || []).slice()
+      .sort((a,b) => (b.fecha||'').localeCompare(a.fecha||''));
+    const pendientes = this.programasPendientesRevision();
 
+    let html = '';
+    // Banner de revisión pendiente
+    if (pendientes.length > 0) {
+      html += `<div class="alert-box red" style="margin-bottom:12px">
+        <strong>⚠ ${pendientes.length} programa(s) pendientes de revisar</strong><br>
+        Hay cirugías programadas en fechas pasadas que aún no tienen confirmado si se realizaron o no.
+        ${pendientes.map(prg => `
+          <div style="margin-top:8px">
+            <button class="btn small" onclick="App.abrirRevisionPrograma('${prg.id}')">
+              Revisar programa de ${fmtDateLong(prg.fecha)}
+            </button>
+          </div>
+        `).join('')}
+      </div>`;
+    }
+
+    html += `
       <div class="toolbar no-print">
-        <h2 style="margin:0">Programa Quirúrgico (${programados.length})</h2>
+        <h2 style="margin:0">Programas quirúrgicos (${programas.length})</h2>
         <div style="flex:1"></div>
-        <button class="btn small" onclick="App.openSelectorPrograma()">+ Agregar al programa</button>
-        <button class="btn ghost small" onclick="window.print()">🖨 Imprimir</button>
+        <button class="btn small" onclick="App.crearPrograma()">+ Nuevo programa</button>
       </div>
     `;
 
-    if (programados.length === 0) {
+    if (programas.length === 0) {
       html += `<div class="empty">
-        <div class="ico">📋</div>
-        <div>No hay cirugías programadas.</div>
-        <div style="margin-top:10px"><button class="btn" onclick="App.openSelectorPrograma()">+ Agregar al programa</button></div>
+        <div class="ico">📅</div>
+        <div>No hay programas registrados.</div>
+        <div style="margin-top:10px"><button class="btn" onclick="App.crearPrograma()">+ Crear primer programa</button></div>
       </div>`;
       return html;
     }
 
-    // Tabla compacta para impresión
+    // Tarjetas resumen de cada programa
+    html += programas.map(prg => {
+      const total = prg.pacientes.length;
+      const operados = prg.pacientes.filter(e => e.operado === true).length;
+      const noOperados = prg.pacientes.filter(e => e.operado === false).length;
+      const pendientesRev = prg.pacientes.filter(e => e.operado === null).length;
+      const esPasado = prg.fecha < todayISO();
+      const esHoy = prg.fecha === todayISO();
+      const necesitaRevision = esPasado && !prg.revisado && pendientesRev > 0;
+
+      let cls = 'patient-card';
+      let estadoTag = '';
+      if (necesitaRevision) {
+        cls += ' alert';
+        estadoTag = '<span class="tag red">Pendiente revisión</span>';
+      } else if (prg.revisado) {
+        cls += ' ready';
+        estadoTag = '<span class="tag green">Revisado</span>';
+      } else if (esHoy) {
+        estadoTag = '<span class="tag blue">Hoy</span>';
+      } else if (prg.fecha > todayISO()) {
+        estadoTag = '<span class="tag yellow">Próximo</span>';
+      }
+
+      // Lista compacta de los pacientes
+      const previewPacientes = prg.pacientes.slice(0,5).map(e => {
+        const p = State.data.patients.find(x => x.id === e.pacienteId);
+        if (!p) return '';
+        const opTag = e.operado === true ? '<span class="tag green" style="font-size:.7rem">✓ Op</span>'
+                    : e.operado === false ? '<span class="tag red" style="font-size:.7rem">✗ No op</span>'
+                    : '';
+        return `<div style="margin-top:4px;font-size:.85rem">
+          ${opTag} <strong>${escapeHtml(p.cama||'?')}</strong> ${escapeHtml(p.nombre||'')} —
+          <em>${escapeHtml(e.procedimiento||'(sin procedimiento)')}</em>
+          ${e.lateralidad?` (${escapeHtml(e.lateralidad)})`:''}
+        </div>`;
+      }).join('');
+      const masPacientes = total > 5 ? `<div class="muted" style="font-size:.8rem;margin-top:4px">+ ${total-5} más…</div>` : '';
+
+      return `
+        <div class="${cls}" onclick="App.abrirPrograma('${prg.id}')">
+          <div class="pc-row">
+            <div class="pc-info">
+              <div class="pc-name">
+                Programa del ${fmtDateLong(prg.fecha)}
+                ${estadoTag}
+              </div>
+              <div class="pc-meta">
+                ${total} cirugía(s) ·
+                ${operados>0?`${operados} operado(s) · `:''}
+                ${noOperados>0?`${noOperados} no operado(s) · `:''}
+                ${pendientesRev>0?`${pendientesRev} sin revisar`:''}
+              </div>
+              ${previewPacientes}
+              ${masPacientes}
+              ${prg.notas?`<div class="pc-meta" style="margin-top:4px"><em>"${escapeHtml(prg.notas)}"</em></div>`:''}
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    return html;
+  },
+
+  /* ---------- Vista de un programa (un día) ---------- */
+  renderProgramaDia(id) {
+    const prg = (State.data.programas || []).find(x => x.id === id);
+    if (!prg) {
+      this._currentProgramaId = null;
+      return this.renderPrograma();
+    }
+    const total = prg.pacientes.length;
+    const operados = prg.pacientes.filter(e => e.operado === true).length;
+    const pendientesRev = prg.pacientes.filter(e => e.operado === null).length;
+    const esPasado = prg.fecha < todayISO();
+    const necesitaRevision = esPasado && !prg.revisado && pendientesRev > 0;
+
+    let html = `
+      <div class="print-only">
+        <div class="print-title">Programa Quirúrgico</div>
+        <div class="print-sub">${fmtDateLong(prg.fecha)} · Servicio de Ortopedia · ${total} cirugía(s)</div>
+      </div>
+
+      <div class="toolbar no-print">
+        <button class="btn ghost small" onclick="App.cerrarPrograma()">← Volver</button>
+        <h2 style="margin:0">${fmtDateLong(prg.fecha)}</h2>
+        <div style="flex:1"></div>
+        ${necesitaRevision ? `<button class="btn small" onclick="App.abrirRevisionPrograma('${prg.id}')">Revisar cirugías</button>` : ''}
+        <button class="btn ghost small" onclick="App.agregarAPrograma('${prg.id}')">+ Paciente</button>
+        <button class="btn ghost small" onclick="window.print()">🖨</button>
+        <button class="btn ghost small" onclick="App.eliminarPrograma('${prg.id}')">Eliminar</button>
+      </div>
+
+      <div class="card no-print">
+        <div class="field-row">
+          <div class="field" style="margin-bottom:0">
+            <label>Fecha del programa</label>
+            <input type="date" value="${escapeHtml(prg.fecha)}" onchange="App.setProgramaCampo('${prg.id}','fecha',this.value)">
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>Estado</label>
+            <input value="${prg.revisado?'Revisado':(esPasado?'Pendiente revisión':'Activo')}" disabled>
+          </div>
+        </div>
+        <div class="field" style="margin-top:8px;margin-bottom:0">
+          <label>Notas del programa</label>
+          <textarea rows="2" placeholder="Ej. Sala 3, equipo de Dr. Pérez, antibiótico cefazolina."
+            oninput="App.setProgramaCampo('${prg.id}','notas',this.value)">${escapeHtml(prg.notas||'')}</textarea>
+        </div>
+      </div>
+    `;
+
+    // Tabla para impresión
     html += `<div class="card print-only">
       <table>
         <thead><tr>
-          <th>Fecha</th><th>Cama</th><th>Paciente</th><th>Cédula</th><th>Edad</th>
+          <th>#</th><th>Cama</th><th>Paciente</th><th>Cédula</th><th>Edad</th>
           <th>Diagnóstico</th><th>Procedimiento</th><th>Lat.</th>
-          <th>Sangre</th><th>Insumos</th><th>Cirujano</th><th>Anestesia</th>
+          <th>Sangre</th><th>Insumos</th><th>Cirujano</th><th>Anestesia</th><th>Obs.</th>
         </tr></thead>
         <tbody>
-          ${programados.map(p => {
-            const x = p.programaQx;
+          ${prg.pacientes.map((e,i) => {
+            const p = State.data.patients.find(x => x.id === e.pacienteId) || {};
             return `<tr>
-              <td>${escapeHtml(x.fechaProgramada||'—')}</td>
+              <td>${i+1}</td>
               <td><strong>${escapeHtml(p.cama||'—')}</strong></td>
               <td>${escapeHtml(p.nombre||'')}</td>
               <td>${escapeHtml(p.cedula||'')}</td>
               <td>${escapeHtml(p.edad||'')}</td>
               <td>${escapeHtml((p.diagnosticos||[]).join('; '))}</td>
-              <td>${escapeHtml(x.procedimiento||'')}</td>
-              <td>${escapeHtml(x.lateralidad||'')}</td>
-              <td>${escapeHtml(x.requerimientoSangre||'—')}</td>
-              <td>${escapeHtml(x.insumos||'—')}</td>
-              <td>${escapeHtml(x.medicoCargo||p.cirujano||'—')}</td>
-              <td>${escapeHtml(x.anestesia||'—')}</td>
+              <td>${escapeHtml(e.procedimiento||'')}</td>
+              <td>${escapeHtml(e.lateralidad||'')}</td>
+              <td>${escapeHtml(e.requerimientoSangre||'—')}</td>
+              <td>${escapeHtml(e.insumos||'—')}</td>
+              <td>${escapeHtml(e.medicoCargo||p.cirujano||'—')}</td>
+              <td>${escapeHtml(e.anestesia||'—')}</td>
+              <td>${escapeHtml(e.observaciones||'')}</td>
             </tr>`;
           }).join('')}
         </tbody>
@@ -1316,68 +1548,180 @@ service cloud.firestore {
     </div>`;
 
     // Tarjetas interactivas
-    html += `<div class="no-print">${programados.map(p => this.renderProgramaCard(p)).join('')}</div>`;
+    if (total === 0) {
+      html += `<div class="empty no-print">
+        <div class="ico">🩺</div>
+        <div>Programa sin pacientes.</div>
+        <div style="margin-top:10px"><button class="btn" onclick="App.agregarAPrograma('${prg.id}')">+ Agregar paciente</button></div>
+      </div>`;
+    } else {
+      html += `<div class="no-print">${prg.pacientes.map((e,i) => this.renderEntradaPrograma(prg, e, i)).join('')}</div>`;
+    }
+
     return html;
   },
 
-  renderProgramaCard(p) {
-    const x = p.programaQx;
-    const apto = evaluarAptoCirugia(p);
-    const dias = daysBetween(p.fechaIngreso);
-    const cls = x.estado === 'realizado' ? 'patient-card ready'
-              : x.estado === 'suspendido' ? 'patient-card alert'
-              : (apto.listo ? 'patient-card' : 'patient-card warn');
+  renderEntradaPrograma(prg, e, idx) {
+    const p = State.data.patients.find(x => x.id === e.pacienteId);
+    if (!p) {
+      return `<div class="card compact"><em class="muted">Paciente eliminado · </em><button class="btn ghost small" onclick="App.quitarDePrograma('${prg.id}','${e.id}')">Quitar entrada</button></div>`;
+    }
+
+    let cls = 'patient-card';
+    let estadoTag = '';
+    if (e.operado === true) { cls += ' ready'; estadoTag = '<span class="tag green">✓ Operado</span>'; }
+    else if (e.operado === false) { cls += ' alert'; estadoTag = `<span class="tag red">✗ No operado</span>`; }
+
+    const lateralidades = ['','Derecha','Izquierda','Bilateral','No aplica'];
+    const sangreOpts = ['','No requiere','Tipo y RH','Tipo y cruce','1 unidad GRE','2 unidades GRE','3 unidades GRE','4 unidades GRE','Reservar GRE + plasma','Otro'];
+    const anestesiaOpts = ['','General','Raquídea','Epidural','Bloqueo regional','Local + sedación','Combinada'];
 
     return `
-      <div class="${cls}" onclick="App.openPacienteEnPrograma('${p.id}')">
+      <div class="${cls}" style="cursor:default">
         <div class="pc-row">
           <div class="pc-bed">${escapeHtml(p.cama||'?')}</div>
           <div class="pc-info">
-            <div class="pc-name">${escapeHtml(p.nombre || '(sin nombre)')}
-              ${x.estado==='realizado'?'<span class="tag green" style="margin-left:6px">Realizado</span>':''}
-              ${x.estado==='suspendido'?'<span class="tag red" style="margin-left:6px">Suspendido</span>':''}
-              ${!x.estado||x.estado==='programado'?'<span class="tag blue" style="margin-left:6px">Programado</span>':''}
-              ${!apto.listo && x.estado!=='realizado' && x.estado!=='suspendido'?'<span class="tag yellow" style="margin-left:6px">Ya no apto</span>':''}
+            <div class="pc-name">
+              ${idx+1}. ${escapeHtml(p.nombre||'(sin nombre)')}
+              ${estadoTag}
+              <button class="btn ghost small" style="float:right" onclick="App.openPaciente('${p.id}')">Ver ficha</button>
             </div>
             <div class="pc-meta">
-              ${escapeHtml(p.cedula||'—')} · ${escapeHtml(p.edad||'?')} años · ${dias} día(s) hosp.
+              ${escapeHtml(p.cedula||'—')} · ${escapeHtml(p.edad||'?')} años · Dx: ${escapeHtml((p.diagnosticos||[]).join(', ')||'—')}
+              ${p.alergias?` · <span class="tag red" style="font-size:.7rem">Alergia: ${escapeHtml(p.alergias)}</span>`:''}
             </div>
-            <div class="pc-meta" style="margin-top:4px">
-              <strong>Dx:</strong> ${escapeHtml((p.diagnosticos||[]).join(', ') || '—')}
+
+            <div class="field" style="margin-top:8px;margin-bottom:8px">
+              <label>Procedimiento</label>
+              <textarea rows="2" placeholder="Ej. RAFI con placa LCP de tibia distal"
+                oninput="App.setEntrada('${prg.id}','${e.id}','procedimiento',this.value)">${escapeHtml(e.procedimiento||'')}</textarea>
             </div>
-            <div class="pc-meta" style="margin-top:4px">
-              <strong>Procedimiento:</strong> ${escapeHtml(x.procedimiento||'—')}
-              ${x.lateralidad?` · <strong>Lat:</strong> ${escapeHtml(x.lateralidad)}`:''}
+
+            <div class="field-row">
+              <div class="field" style="margin-bottom:0">
+                <label>Lateralidad</label>
+                <select onchange="App.setEntrada('${prg.id}','${e.id}','lateralidad',this.value)">
+                  ${lateralidades.map(l => `<option value="${l}" ${e.lateralidad===l?'selected':''}>${l||'—'}</option>`).join('')}
+                </select>
+              </div>
+              <div class="field" style="margin-bottom:0">
+                <label>Médico a cargo</label>
+                <input value="${escapeHtml(e.medicoCargo||p.cirujano||'')}" oninput="App.setEntrada('${prg.id}','${e.id}','medicoCargo',this.value)">
+              </div>
             </div>
-            <div class="pc-meta">
-              <strong>Sangre:</strong> ${escapeHtml(x.requerimientoSangre||'—')} ·
-              <strong>Cirujano:</strong> ${escapeHtml(x.medicoCargo||p.cirujano||'—')}
-              ${x.fechaProgramada?` · <strong>Fecha:</strong> ${fmtDate(x.fechaProgramada)}`:''}
+
+            <div class="field-row" style="margin-top:8px">
+              <div class="field" style="margin-bottom:0">
+                <label>Sangre</label>
+                <select onchange="App.setEntrada('${prg.id}','${e.id}','requerimientoSangre',this.value)">
+                  ${sangreOpts.map(s => `<option value="${s}" ${e.requerimientoSangre===s?'selected':''}>${s||'—'}</option>`).join('')}
+                </select>
+              </div>
+              <div class="field" style="margin-bottom:0">
+                <label>Anestesia</label>
+                <select onchange="App.setEntrada('${prg.id}','${e.id}','anestesia',this.value)">
+                  ${anestesiaOpts.map(a => `<option value="${a}" ${e.anestesia===a?'selected':''}>${a||'—'}</option>`).join('')}
+                </select>
+              </div>
             </div>
-            ${x.insumos?`<div class="pc-meta" style="margin-top:4px"><strong>Insumos:</strong> ${escapeHtml(x.insumos)}</div>`:''}
-            ${x.anestesia?`<div class="pc-meta"><strong>Anestesia:</strong> ${escapeHtml(x.anestesia)}</div>`:''}
-            ${x.observaciones?`<div class="pc-meta"><strong>Obs:</strong> ${escapeHtml(x.observaciones)}</div>`:''}
+
+            <div class="field" style="margin-top:8px;margin-bottom:0">
+              <label>Insumos necesarios</label>
+              <textarea rows="2" oninput="App.setEntrada('${prg.id}','${e.id}','insumos',this.value)">${escapeHtml(e.insumos||'')}</textarea>
+            </div>
+
+            <div class="field" style="margin-top:8px;margin-bottom:0">
+              <label>Observaciones</label>
+              <textarea rows="2" oninput="App.setEntrada('${prg.id}','${e.id}','observaciones',this.value)">${escapeHtml(e.observaciones||'')}</textarea>
+            </div>
+
+            <div style="margin-top:8px;text-align:right">
+              <button class="btn ghost small" onclick="App.quitarDePrograma('${prg.id}','${e.id}')">Quitar del programa</button>
+            </div>
           </div>
         </div>
       </div>
     `;
   },
 
-  // Selector: lista pacientes listos para cirugía y permite agregarlos al programa
-  openSelectorPrograma() {
+  /* ---------- Acciones del programa ---------- */
+  programasPendientesRevision() {
+    const hoy = todayISO();
+    return (State.data.programas || []).filter(prg =>
+      prg.fecha < hoy &&
+      !prg.revisado &&
+      prg.pacientes.some(e => e.operado === null)
+    );
+  },
+
+  abrirPrograma(id) {
+    this._currentProgramaId = id;
+    this.render();
+    window.scrollTo({top:0});
+  },
+  cerrarPrograma() {
+    this._currentProgramaId = null;
+    this.render();
+  },
+
+  crearPrograma() {
+    const fecha = prompt('Fecha del programa (YYYY-MM-DD):', todayISO());
+    if (!fecha) return;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+      alert('Fecha inválida. Formato: YYYY-MM-DD (ej. 2026-05-12).');
+      return;
+    }
+    const existente = (State.data.programas || []).find(p => p.fecha === fecha);
+    if (existente) {
+      if (confirm(`Ya existe un programa para el ${fmtDateLong(fecha)}. ¿Quieres abrirlo?`)) {
+        this.abrirPrograma(existente.id);
+      }
+      return;
+    }
+    const prg = nuevoPrograma(fecha);
+    State.data.programas.push(prg);
+    State.save();
+    this.abrirPrograma(prg.id);
+  },
+
+  eliminarPrograma(id) {
+    if (!confirm('¿Eliminar este programa? Si tenía cirugías ya marcadas como operadas, la información en cada paciente se conserva (queda en su ficha).')) return;
+    State.data.programas = State.data.programas.filter(p => p.id !== id);
+    State.save();
+    this._currentProgramaId = null;
+    this.render();
+  },
+
+  setProgramaCampo(id, campo, val) {
+    const prg = State.data.programas.find(p => p.id === id);
+    if (!prg) return;
+    prg[campo] = val;
+    State.save();
+  },
+
+  agregarAPrograma(programaId) {
+    const prg = State.data.programas.find(p => p.id === programaId);
+    if (!prg) return;
+    // Candidatos: listos para cirugía, no en este programa, no operados
+    const yaEnPrg = new Set(prg.pacientes.map(e => e.pacienteId));
     const candidatos = State.data.patients
       .filter(p => !p.fechaEgreso)
-      .filter(p => evaluarAptoCirugia(p).listo)
-      .filter(p => !(p.programaQx && p.programaQx.programado))
-      .sort((a,b) => (a.cama||'').localeCompare(b.cama||'', 'es', {numeric:true}));
+      .filter(p => !(p.cirugia && p.cirugia.realizada))
+      .filter(p => !yaEnPrg.has(p.id))
+      .sort((a,b) => {
+        const aListo = evaluarAptoCirugia(a).listo ? 0 : 1;
+        const bListo = evaluarAptoCirugia(b).listo ? 0 : 1;
+        if (aListo !== bListo) return aListo - bListo;
+        return (a.cama||'').localeCompare(b.cama||'', 'es', {numeric:true});
+      });
 
     const html = `
       <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
         <div class="modal" style="max-width:600px">
           <div class="modal-head">
             <div>
-              <div style="font-weight:600">Agregar al programa quirúrgico</div>
-              <div style="font-size:.8rem;opacity:.9">Selecciona un paciente listo para cirugía</div>
+              <div style="font-weight:600">Agregar al programa</div>
+              <div style="font-size:.8rem;opacity:.9">${fmtDateLong(prg.fecha)}</div>
             </div>
             <button class="close-x" onclick="App.closeModal()">✕</button>
           </div>
@@ -1385,25 +1729,27 @@ service cloud.firestore {
             ${candidatos.length === 0 ? `
               <div class="empty">
                 <div class="ico">⏳</div>
-                <div>No hay pacientes listos para cirugía sin programar.</div>
-                <div class="muted" style="margin-top:8px">Asegúrate de que los estudios preoperatorios estén completos.</div>
+                <div>No hay pacientes disponibles para programar.</div>
               </div>
-            ` : candidatos.map(p => `
-              <div class="patient-card ready" onclick="App.agregarAlPrograma('${p.id}')">
+            ` : candidatos.map(p => {
+              const apto = evaluarAptoCirugia(p);
+              const cls = apto.listo ? 'patient-card ready' : 'patient-card warn';
+              return `
+              <div class="${cls}" onclick="App.confirmarAgregarPrograma('${prg.id}','${p.id}')">
                 <div class="pc-row">
                   <div class="pc-bed">${escapeHtml(p.cama||'?')}</div>
                   <div class="pc-info">
-                    <div class="pc-name">${escapeHtml(p.nombre||'(sin nombre)')}</div>
+                    <div class="pc-name">${escapeHtml(p.nombre||'(sin nombre)')}
+                      ${apto.listo?'<span class="tag green">Listo</span>':'<span class="tag yellow">Pendiente preop</span>'}
+                    </div>
                     <div class="pc-meta">${escapeHtml(p.cedula||'—')} · ${escapeHtml(p.edad||'?')} años</div>
                     <div class="pc-meta"><strong>Dx:</strong> ${escapeHtml((p.diagnosticos||[]).join(', ')||'—')}</div>
                     <div class="pc-meta"><strong>Cirujano:</strong> ${escapeHtml(p.cirujano||'—')}</div>
+                    ${!apto.listo?`<div class="pc-meta" style="color:#92400e">${escapeHtml(apto.motivo)}${apto.faltantes&&apto.faltantes.length?': '+escapeHtml(apto.faltantes.join(', ')):''}</div>`:''}
                   </div>
                 </div>
-              </div>
-            `).join('')}
-
-            <hr>
-            <p class="muted">¿Necesitas programar a un paciente que aún no aparece como "listo"? Abre su ficha desde el pase de visita y completa el preoperatorio. Si quieres programarlo de todas formas (excepción), también puedes hacerlo desde la sub-pestaña "Programa Qx" dentro del paciente.</p>
+              </div>`;
+            }).join('')}
           </div>
           <div class="modal-foot">
             <button class="btn ghost" onclick="App.closeModal()">Cancelar</button>
@@ -1414,24 +1760,145 @@ service cloud.firestore {
     document.getElementById('modalRoot').innerHTML = html;
   },
 
-  agregarAlPrograma(id) {
-    const p = this._findP(id); if (!p) return;
-    const x = getProgramaQx(p);
-    x.programado = true;
-    if (!x.estado) x.estado = 'programado';
-    if (!x.fechaProgramada) x.fechaProgramada = todayISO();
-    if (!x.medicoCargo) x.medicoCargo = p.cirujano || '';
-    logCambio(p, 'Programa Qx', 'Agregado al programa quirúrgico');
+  confirmarAgregarPrograma(programaId, pacienteId) {
+    const prg = State.data.programas.find(p => p.id === programaId);
+    const p = this._findP(pacienteId);
+    if (!prg || !p) return;
+    const defaults = {
+      medicoCargo: p.cirujano || '',
+      // Si el paciente tenía datos legacy en programaQx, los reusamos
+      procedimiento: (p.programaQx && p.programaQx.procedimiento) || '',
+      lateralidad: (p.programaQx && p.programaQx.lateralidad) || '',
+      insumos: (p.programaQx && p.programaQx.insumos) || '',
+      requerimientoSangre: (p.programaQx && p.programaQx.requerimientoSangre) || '',
+      anestesia: (p.programaQx && p.programaQx.anestesia) || '',
+      observaciones: (p.programaQx && p.programaQx.observaciones) || ''
+    };
+    prg.pacientes.push(nuevaEntradaPrograma(p.id, defaults));
+    logCambio(p, 'Programa Qx', `Agregado al programa del ${prg.fecha}`);
     State.save();
     this.closeModal();
-    this._modalSubtab = 'programa';
-    this.openPaciente(id);
   },
 
-  openPacienteEnPrograma(id) {
-    this._modalSubtab = 'programa';
-    this._currentModalId = id;
-    this.renderModal(id);
+  setEntrada(programaId, entradaId, campo, val) {
+    const prg = State.data.programas.find(p => p.id === programaId);
+    if (!prg) return;
+    const e = prg.pacientes.find(x => x.id === entradaId);
+    if (!e) return;
+    e[campo] = val;
+    State.save();
+  },
+
+  quitarDePrograma(programaId, entradaId) {
+    if (!confirm('¿Quitar este paciente del programa?')) return;
+    const prg = State.data.programas.find(p => p.id === programaId);
+    if (!prg) return;
+    const e = prg.pacientes.find(x => x.id === entradaId);
+    if (!e) return;
+    const p = this._findP(e.pacienteId);
+    prg.pacientes = prg.pacientes.filter(x => x.id !== entradaId);
+    if (p) logCambio(p, 'Programa Qx', `Quitado del programa del ${prg.fecha}`);
+    State.save();
+    this.render();
+  },
+
+  /* ---------- Revisión post-programa ---------- */
+  abrirRevisionPrograma(id) {
+    const prg = State.data.programas.find(p => p.id === id);
+    if (!prg) return;
+    const html = `
+      <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
+        <div class="modal" style="max-width:700px">
+          <div class="modal-head">
+            <div>
+              <div style="font-weight:600">Revisar programa</div>
+              <div style="font-size:.8rem;opacity:.9">${fmtDateLong(prg.fecha)} · ¿Qué pacientes fueron operados?</div>
+            </div>
+            <button class="close-x" onclick="App.closeModal()">✕</button>
+          </div>
+          <div class="modal-body" id="revBody">
+            ${prg.pacientes.map(e => this.renderEntradaRevision(prg, e)).join('')}
+          </div>
+          <div class="modal-foot">
+            <button class="btn ghost" onclick="App.closeModal()">Cerrar</button>
+            <button class="btn success" onclick="App.finalizarRevision('${prg.id}')">Finalizar revisión</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.getElementById('modalRoot').innerHTML = html;
+  },
+
+  renderEntradaRevision(prg, e) {
+    const p = State.data.patients.find(x => x.id === e.pacienteId);
+    if (!p) return `<div class="card compact muted">Paciente eliminado.</div>`;
+    return `
+      <div class="card compact" style="margin-bottom:10px">
+        <div class="strong">${escapeHtml(p.nombre||'(sin nombre)')} · Cama ${escapeHtml(p.cama||'?')}</div>
+        <div class="muted" style="font-size:.85rem">${escapeHtml(e.procedimiento||'(sin procedimiento)')}${e.lateralidad?' ('+escapeHtml(e.lateralidad)+')':''}</div>
+        <div class="row-gap" style="margin-top:8px">
+          <button class="btn ${e.operado===true?'success':'ghost'} small" onclick="App.marcarRevision('${prg.id}','${e.id}',true)">Sí, operado</button>
+          <button class="btn ${e.operado===false?'danger':'ghost'} small" onclick="App.marcarRevision('${prg.id}','${e.id}',false)">No operado</button>
+        </div>
+        ${e.operado === false ? `
+          <div class="field" style="margin-top:8px;margin-bottom:0">
+            <label>Motivo (opcional)</label>
+            <input value="${escapeHtml(e.motivoNoOperado||'')}" placeholder="Ej. Suspendido por mal estado, falta de sala…"
+              oninput="App.setEntrada('${prg.id}','${e.id}','motivoNoOperado',this.value)">
+          </div>
+        ` : ''}
+        ${e.operado === true ? `<div class="muted" style="font-size:.8rem;margin-top:4px">✓ Marcado como operado el ${fmtDate(prg.fecha)}</div>` : ''}
+      </div>
+    `;
+  },
+
+  marcarRevision(programaId, entradaId, operado) {
+    const prg = State.data.programas.find(p => p.id === programaId);
+    if (!prg) return;
+    const e = prg.pacientes.find(x => x.id === entradaId);
+    if (!e) return;
+    e.operado = operado;
+    const p = this._findP(e.pacienteId);
+    if (p) {
+      if (operado) {
+        const c = getCirugia(p);
+        c.realizada = true;
+        c.fecha = prg.fecha;
+        c.procedimiento = e.procedimiento || '';
+        c.lateralidad = e.lateralidad || '';
+        c.cirujano = e.medicoCargo || p.cirujano || '';
+        c.programaId = prg.id;
+        c.notas = e.observaciones || '';
+        logCambio(p, 'Cirugía', `Operado el ${prg.fecha} — ${e.procedimiento}${e.lateralidad?' ('+e.lateralidad+')':''}`);
+      } else {
+        // Si previamente había sido marcado operado y ahora se cambia, revertir
+        if (p.cirugia && p.cirugia.realizada && p.cirugia.programaId === prg.id) {
+          p.cirugia.realizada = false;
+          p.cirugia.fecha = '';
+          p.cirugia.programaId = '';
+          logCambio(p, 'Cirugía', 'Marcado como NO operado en revisión');
+        } else {
+          logCambio(p, 'Programa Qx', `No operado en programa del ${prg.fecha}`);
+        }
+      }
+    }
+    State.save();
+    // Re-render del modal de revisión
+    document.getElementById('revBody').innerHTML =
+      prg.pacientes.map(en => this.renderEntradaRevision(prg, en)).join('');
+  },
+
+  finalizarRevision(programaId) {
+    const prg = State.data.programas.find(p => p.id === programaId);
+    if (!prg) return;
+    const sinDecidir = prg.pacientes.filter(e => e.operado === null).length;
+    if (sinDecidir > 0) {
+      if (!confirm(`Aún hay ${sinDecidir} paciente(s) sin marcar. ¿Cerrar revisión de todas formas?`)) return;
+    }
+    prg.revisado = true;
+    State.save();
+    this.closeModal();
+    this.render();
   },
 
   /* ---------- Alertas globales ---------- */
@@ -1766,113 +2233,113 @@ service cloud.firestore {
 
   /* -------- Programa Quirúrgico (sub-pestaña en la ficha) -------- */
   tabPrograma(p) {
-    const x = getProgramaQx(p);
-    const apto = evaluarAptoCirugia(p);
-    const lateralidades = ['','Derecha','Izquierda','Bilateral','No aplica'];
-    const sangreOpts = ['','No requiere','Tipo y RH','Tipo y cruce','1 unidad GRE','2 unidades GRE','3 unidades GRE','4 unidades GRE','Reservar GRE + plasma','Otro'];
-    const anestesiaOpts = ['','General','Raquídea','Epidural','Bloqueo regional','Local + sedación','Combinada'];
-    const estadoOpts = ['','programado','realizado','suspendido'];
+    const c = getCirugia(p);
+    // Buscar en qué programas aparece este paciente
+    const enProgramas = (State.data.programas || [])
+      .filter(prg => prg.pacientes.some(e => e.pacienteId === p.id))
+      .sort((a,b) => (b.fecha||'').localeCompare(a.fecha||''));
 
-    const aptoBox = !x.programado
-      ? (apto.listo
-          ? `<div class="alert-box green">Paciente listo para cirugía. Puedes incluirlo en el programa.</div>`
-          : `<div class="alert-box yellow"><strong>Atención:</strong> el paciente aún no cumple criterios para cirugía (${apto.motivo}). Puedes incluirlo igual si es una excepción justificada, pero revisa el preoperatorio.</div>`)
-      : `<div class="alert-box blue">Este paciente está incluido en el programa quirúrgico.</div>`;
+    let html = '';
 
-    return `
-      ${aptoBox}
-
-      <div class="card">
-        <div class="checkbox-row">
-          <input type="checkbox" id="prog-${p.id}" ${x.programado?'checked':''}
-            onchange="App.toggleProgramado('${p.id}',this.checked)">
-          <label for="prog-${p.id}"><strong>Incluir en el programa quirúrgico</strong></label>
+    // Si fue operado, mostrar info post-op
+    if (c.realizada) {
+      const dpost = diasPostop(p);
+      html += `
+        <div class="alert-box green">
+          <strong>✓ Paciente operado.</strong><br>
+          ${escapeHtml(c.procedimiento||'—')} ${c.lateralidad?' ('+escapeHtml(c.lateralidad)+')':''}<br>
+          Fecha de cirugía: ${fmtDate(c.fecha)} · <strong>${dpost} día(s) postoperatorio</strong>
+          ${c.cirujano?` · Cirujano: ${escapeHtml(c.cirujano)}`:''}
         </div>
 
-        <div class="field-row" style="margin-top:8px">
-          <div class="field" style="margin-bottom:0">
-            <label>Fecha programada</label>
-            <input type="date" value="${escapeHtml(x.fechaProgramada)}"
-              onchange="App.setPrograma('${p.id}','fechaProgramada',this.value)">
+        <div class="card">
+          <h3>Datos de la cirugía realizada</h3>
+          <div class="field-row">
+            <div class="field" style="margin-bottom:0">
+              <label>Fecha</label>
+              <input type="date" value="${escapeHtml(c.fecha)}" onchange="App.setCirugia('${p.id}','fecha',this.value)">
+            </div>
+            <div class="field" style="margin-bottom:0">
+              <label>Cirujano</label>
+              <input value="${escapeHtml(c.cirujano||'')}" oninput="App.setCirugia('${p.id}','cirujano',this.value)">
+            </div>
           </div>
-          <div class="field" style="margin-bottom:0">
-            <label>Estado</label>
-            <select onchange="App.setPrograma('${p.id}','estado',this.value)">
-              ${estadoOpts.map(e => `<option value="${e}" ${x.estado===e?'selected':''}>${e?e[0].toUpperCase()+e.slice(1):'—'}</option>`).join('')}
-            </select>
+          <div class="field" style="margin-top:8px">
+            <label>Procedimiento</label>
+            <textarea rows="2" oninput="App.setCirugia('${p.id}','procedimiento',this.value)">${escapeHtml(c.procedimiento||'')}</textarea>
           </div>
-        </div>
-
-        ${x.estado==='realizado'?`
+          <div class="field-row">
+            <div class="field" style="margin-bottom:0">
+              <label>Lateralidad</label>
+              <input value="${escapeHtml(c.lateralidad||'')}" oninput="App.setCirugia('${p.id}','lateralidad',this.value)">
+            </div>
+          </div>
           <div class="field" style="margin-top:8px;margin-bottom:0">
-            <label>Fecha realizado</label>
-            <input type="date" value="${escapeHtml(x.fechaRealizado||'')}"
-              onchange="App.setPrograma('${p.id}','fechaRealizado',this.value)">
+            <label>Notas de cirugía</label>
+            <textarea rows="2" oninput="App.setCirugia('${p.id}','notas',this.value)">${escapeHtml(c.notas||'')}</textarea>
           </div>
-        `:''}
-      </div>
-
-      <div class="card">
-        <h3>Datos del procedimiento</h3>
-
-        <div class="field">
-          <label>Procedimiento quirúrgico *</label>
-          <textarea rows="2" placeholder="Ej. Reducción abierta y fijación interna con placa LCP de tibia distal"
-            oninput="App.setPrograma('${p.id}','procedimiento',this.value)">${escapeHtml(x.procedimiento)}</textarea>
-        </div>
-
-        <div class="field-row">
-          <div class="field" style="margin-bottom:0">
-            <label>Lateralidad</label>
-            <select onchange="App.setPrograma('${p.id}','lateralidad',this.value)">
-              ${lateralidades.map(l => `<option value="${l}" ${x.lateralidad===l?'selected':''}>${l||'—'}</option>`).join('')}
-            </select>
-          </div>
-          <div class="field" style="margin-bottom:0">
-            <label>Médico a cargo</label>
-            <input value="${escapeHtml(x.medicoCargo||p.cirujano||'')}"
-              oninput="App.setPrograma('${p.id}','medicoCargo',this.value)">
+          <div style="margin-top:10px;text-align:right">
+            <button class="btn ghost small" onclick="App.deshacerCirugia('${p.id}')">Marcar como no operado</button>
           </div>
         </div>
+      `;
+    } else {
+      // No operado todavía — mostrar estado del preop
+      const apto = evaluarAptoCirugia(p);
+      html += apto.listo
+        ? `<div class="alert-box green">Paciente <strong>listo para cirugía</strong>. Puedes agregarlo al programa quirúrgico desde la pestaña <em>Programa Qx</em>.</div>`
+        : `<div class="alert-box yellow"><strong>Pendiente de preoperatorio.</strong> ${escapeHtml(apto.motivo)}${apto.faltantes&&apto.faltantes.length?': '+escapeHtml(apto.faltantes.join(', ')):''}</div>`;
+    }
 
-        <div class="field-row" style="margin-top:8px">
-          <div class="field" style="margin-bottom:0">
-            <label>Requerimiento de sangre</label>
-            <select onchange="App.setPrograma('${p.id}','requerimientoSangre',this.value)">
-              ${sangreOpts.map(s => `<option value="${s}" ${x.requerimientoSangre===s?'selected':''}>${s||'—'}</option>`).join('')}
-            </select>
-          </div>
-          <div class="field" style="margin-bottom:0">
-            <label>Tipo de anestesia</label>
-            <select onchange="App.setPrograma('${p.id}','anestesia',this.value)">
-              ${anestesiaOpts.map(a => `<option value="${a}" ${x.anestesia===a?'selected':''}>${a||'—'}</option>`).join('')}
-            </select>
-          </div>
-        </div>
+    // Historial de programas
+    if (enProgramas.length > 0) {
+      html += `<div class="card">
+        <h3>Aparece en programas</h3>
+        ${enProgramas.map(prg => {
+          const e = prg.pacientes.find(x => x.pacienteId === p.id);
+          const opTag = e.operado === true ? '<span class="tag green">Operado</span>'
+                      : e.operado === false ? '<span class="tag red">No operado</span>'
+                      : '<span class="tag blue">Programado</span>';
+          return `
+            <div class="card compact" style="margin-top:8px;cursor:pointer" onclick="App.closeModal();App.switchTab('programa');App.abrirPrograma('${prg.id}')">
+              <div class="row-between">
+                <div>
+                  <strong>${fmtDateLong(prg.fecha)}</strong> ${opTag}
+                  ${e.motivoNoOperado?`<div class="muted" style="font-size:.8rem">Motivo: ${escapeHtml(e.motivoNoOperado)}</div>`:''}
+                </div>
+                <div class="muted" style="font-size:.85rem">→</div>
+              </div>
+              <div class="muted" style="font-size:.85rem;margin-top:4px">
+                ${escapeHtml(e.procedimiento||'(sin procedimiento)')}${e.lateralidad?' ('+escapeHtml(e.lateralidad)+')':''}
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>`;
+    } else if (!c.realizada) {
+      html += `<div class="card muted" style="text-align:center">
+        Este paciente no está en ningún programa quirúrgico.<br>
+        <button class="btn small" style="margin-top:8px" onclick="App.closeModal();App.switchTab('programa')">Ir a Programa Qx</button>
+      </div>`;
+    }
 
-        <div class="field" style="margin-top:8px">
-          <label>Insumos necesarios</label>
-          <textarea rows="3" placeholder="Ej. Placa LCP tibia distal 8 huecos, tornillos corticales 3.5mm, clavo Steinmann, motor de taladro, fluoroscopia"
-            oninput="App.setPrograma('${p.id}','insumos',this.value)">${escapeHtml(x.insumos)}</textarea>
-        </div>
+    return html;
+  },
 
-        <div class="field" style="margin-bottom:0">
-          <label>Observaciones</label>
-          <textarea rows="2" placeholder="Notas adicionales relevantes para sala (alergias, antibiótico profiláctico, posición, etc.)"
-            oninput="App.setPrograma('${p.id}','observaciones',this.value)">${escapeHtml(x.observaciones||'')}</textarea>
-        </div>
-      </div>
+  setCirugia(id, campo, val) {
+    const p = this._findP(id); if (!p) return;
+    const c = getCirugia(p);
+    c[campo] = val;
+    State.save();
+  },
 
-      <div class="card">
-        <h4>Resumen para la planilla del programa</h4>
-        <div class="muted" style="font-size:.85rem;line-height:1.6">
-          <div><strong>Paciente:</strong> ${escapeHtml(p.nombre||'(sin nombre)')} · ${escapeHtml(p.cedula||'sin cédula')} · ${escapeHtml(p.edad||'?')} años · Cama ${escapeHtml(p.cama||'?')}</div>
-          <div><strong>Diagnóstico:</strong> ${escapeHtml((p.diagnosticos||[]).join('; ')||'—')}</div>
-          <div><strong>Alergias:</strong> ${escapeHtml(p.alergias||'ninguna registrada')}</div>
-          <div><strong>Antecedentes:</strong> ${escapeHtml(p.antecedentesPatologicos||'ninguno')}</div>
-        </div>
-      </div>
-    `;
+  deshacerCirugia(id) {
+    if (!confirm('¿Marcar al paciente como NO operado? Esto lo regresa al estado pre-cirugía.')) return;
+    const p = this._findP(id); if (!p) return;
+    p.cirugia = { realizada:false, fecha:'', procedimiento:'', lateralidad:'', cirujano:'', programaId:'', notas:'' };
+    logCambio(p, 'Cirugía', 'Revertido — marcado como no operado');
+    State.save();
+    this.renderModal(id);
   },
 
   /* -------- Medicamentos -------- */
@@ -2188,33 +2655,6 @@ service cloud.firestore {
     logCambio(p,'Contraindicación',`${campo}: ${val}`);
     State.save();
     this.renderModal(id);
-  },
-
-  // Programa quirúrgico
-  toggleProgramado(id, val) {
-    const p = this._findP(id); if (!p) return;
-    const x = getProgramaQx(p);
-    x.programado = val;
-    if (val) {
-      if (!x.estado) x.estado = 'programado';
-      if (!x.fechaProgramada) x.fechaProgramada = todayISO();
-      if (!x.medicoCargo) x.medicoCargo = p.cirujano || '';
-    }
-    logCambio(p, 'Programa Qx', val ? 'Incluido en programa' : 'Retirado del programa');
-    State.save();
-    this.renderModal(id);
-  },
-  setPrograma(id, campo, val) {
-    const p = this._findP(id); if (!p) return;
-    const x = getProgramaQx(p);
-    x[campo] = val;
-    // Reglas auxiliares
-    if (campo === 'estado') {
-      if (val === 'realizado' && !x.fechaRealizado) x.fechaRealizado = todayISO();
-      if (val) x.programado = (val !== 'suspendido') ? true : x.programado;
-    }
-    State.save();
-    if (campo === 'estado') this.renderModal(id);
   },
 
   // Medicamentos
