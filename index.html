@@ -397,7 +397,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v1.6-programas-diarios-2026-05-08';
+const APP_VERSION = 'v1.7-prog-solo-listos-2026-05-08';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -1702,18 +1702,21 @@ service cloud.firestore {
   agregarAPrograma(programaId) {
     const prg = State.data.programas.find(p => p.id === programaId);
     if (!prg) return;
-    // Candidatos: listos para cirugía, no en este programa, no operados
+    // Candidatos: SOLO pacientes listos para cirugía, no en este programa, no operados, no egresados
     const yaEnPrg = new Set(prg.pacientes.map(e => e.pacienteId));
     const candidatos = State.data.patients
       .filter(p => !p.fechaEgreso)
       .filter(p => !(p.cirugia && p.cirugia.realizada))
       .filter(p => !yaEnPrg.has(p.id))
-      .sort((a,b) => {
-        const aListo = evaluarAptoCirugia(a).listo ? 0 : 1;
-        const bListo = evaluarAptoCirugia(b).listo ? 0 : 1;
-        if (aListo !== bListo) return aListo - bListo;
-        return (a.cama||'').localeCompare(b.cama||'', 'es', {numeric:true});
-      });
+      .filter(p => evaluarAptoCirugia(p).listo)
+      .sort((a,b) => (a.cama||'').localeCompare(b.cama||'', 'es', {numeric:true}));
+
+    // Para informar al usuario cuántos pacientes hay pendientes (no aptos) y por qué
+    const noAptos = State.data.patients
+      .filter(p => !p.fechaEgreso)
+      .filter(p => !(p.cirugia && p.cirugia.realizada))
+      .filter(p => !yaEnPrg.has(p.id))
+      .filter(p => !evaluarAptoCirugia(p).listo).length;
 
     const html = `
       <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
@@ -1721,7 +1724,7 @@ service cloud.firestore {
           <div class="modal-head">
             <div>
               <div style="font-weight:600">Agregar al programa</div>
-              <div style="font-size:.8rem;opacity:.9">${fmtDateLong(prg.fecha)}</div>
+              <div style="font-size:.8rem;opacity:.9">${fmtDateLong(prg.fecha)} · sólo pacientes listos para cirugía</div>
             </div>
             <button class="close-x" onclick="App.closeModal()">✕</button>
           </div>
@@ -1729,27 +1732,27 @@ service cloud.firestore {
             ${candidatos.length === 0 ? `
               <div class="empty">
                 <div class="ico">⏳</div>
-                <div>No hay pacientes disponibles para programar.</div>
+                <div>No hay pacientes listos para cirugía disponibles.</div>
+                ${noAptos > 0 ? `<div class="muted" style="margin-top:8px">Hay ${noAptos} paciente(s) hospitalizados pero aún no cumplen criterios. Completa su preoperatorio en la pestaña <em>Pase de visita</em> y aparecerán aquí.</div>` : ''}
               </div>
-            ` : candidatos.map(p => {
-              const apto = evaluarAptoCirugia(p);
-              const cls = apto.listo ? 'patient-card ready' : 'patient-card warn';
-              return `
-              <div class="${cls}" onclick="App.confirmarAgregarPrograma('${prg.id}','${p.id}')">
-                <div class="pc-row">
-                  <div class="pc-bed">${escapeHtml(p.cama||'?')}</div>
-                  <div class="pc-info">
-                    <div class="pc-name">${escapeHtml(p.nombre||'(sin nombre)')}
-                      ${apto.listo?'<span class="tag green">Listo</span>':'<span class="tag yellow">Pendiente preop</span>'}
+            ` : `
+              ${noAptos > 0 ? `<div class="alert-box blue" style="font-size:.85rem">Mostrando los <strong>${candidatos.length}</strong> paciente(s) listo(s) para cirugía. Hay ${noAptos} más en el servicio que aún no cumplen criterios.</div>` : ''}
+              ${candidatos.map(p => `
+                <div class="patient-card ready" onclick="App.confirmarAgregarPrograma('${prg.id}','${p.id}')">
+                  <div class="pc-row">
+                    <div class="pc-bed">${escapeHtml(p.cama||'?')}</div>
+                    <div class="pc-info">
+                      <div class="pc-name">${escapeHtml(p.nombre||'(sin nombre)')}
+                        <span class="tag green">Listo</span>
+                      </div>
+                      <div class="pc-meta">${escapeHtml(p.cedula||'—')} · ${escapeHtml(p.edad||'?')} años</div>
+                      <div class="pc-meta"><strong>Dx:</strong> ${escapeHtml((p.diagnosticos||[]).join(', ')||'—')}</div>
+                      <div class="pc-meta"><strong>Cirujano:</strong> ${escapeHtml(p.cirujano||'—')}</div>
                     </div>
-                    <div class="pc-meta">${escapeHtml(p.cedula||'—')} · ${escapeHtml(p.edad||'?')} años</div>
-                    <div class="pc-meta"><strong>Dx:</strong> ${escapeHtml((p.diagnosticos||[]).join(', ')||'—')}</div>
-                    <div class="pc-meta"><strong>Cirujano:</strong> ${escapeHtml(p.cirujano||'—')}</div>
-                    ${!apto.listo?`<div class="pc-meta" style="color:#92400e">${escapeHtml(apto.motivo)}${apto.faltantes&&apto.faltantes.length?': '+escapeHtml(apto.faltantes.join(', ')):''}</div>`:''}
                   </div>
                 </div>
-              </div>`;
-            }).join('')}
+              `).join('')}
+            `}
           </div>
           <div class="modal-foot">
             <button class="btn ghost" onclick="App.closeModal()">Cancelar</button>
