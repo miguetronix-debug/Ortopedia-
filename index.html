@@ -381,6 +381,7 @@
   <button data-tab="lista" class="active" onclick="App.switchTab('lista')">Pase de visita</button>
   <button data-tab="cirugia" onclick="App.switchTab('cirugia')">Listos para cirugía</button>
   <button data-tab="programa" onclick="App.switchTab('programa')">Programa Qx</button>
+  <button data-tab="salidas" onclick="App.switchTab('salidas')">Salida</button>
   <button data-tab="alertas" onclick="App.switchTab('alertas')">Alertas <span class="badge" id="alertCount" style="display:none">0</span></button>
   <button data-tab="todos" onclick="App.switchTab('todos')">Todos</button>
 </nav>
@@ -397,7 +398,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v1.8-quirofanos-orden-2026-05-08';
+const APP_VERSION = 'v1.9-salidas-egresos-2026-05-08';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -590,6 +591,71 @@ function diasPostop(p) {
   return daysBetween(c.fecha, fin);
 }
 
+/* ---------- Egresos / reportes de salida ---------- */
+function nuevoEgreso(pacienteId) {
+  return {
+    id: 'eg_' + Date.now().toString(36) + Math.random().toString(36).slice(2,8),
+    pacienteId,
+    fechaEgreso: todayISO(),
+    diagnosticoFinal: '',
+    resumenEvolucion: '',
+    cirugiasResumen: [],         // [{fecha, procedimiento, lateralidad, cirujano, quirofano, notas}]
+    laboratoriosResumen: '',
+    medicamentosEgreso: '',
+    referencias: [],             // [{especialidad, fecha, lugar, notas}]
+    curacionHeridas: { lugar:'', frecuencia:'', instrucciones:'' },
+    citaControl: { fecha:'', lugar:'', especialidad:'Ortopedia', notas:'' },
+    rayosXControl: { requiere:false, descripcion:'' },
+    recomendaciones: '',
+    creado: new Date().toISOString(),
+    modificado: new Date().toISOString()
+  };
+}
+
+function getCirugiasDelPaciente(pacienteId) {
+  const lista = [];
+  (State.data.programas || []).forEach(prg => {
+    (prg.pacientes || []).forEach(e => {
+      if (e.pacienteId === pacienteId && e.operado === true) {
+        lista.push({
+          fecha: prg.fecha,
+          procedimiento: e.procedimiento || '',
+          lateralidad: e.lateralidad || '',
+          cirujano: e.medicoCargo || '',
+          quirofano: e.quirofano || '',
+          notas: e.observaciones || ''
+        });
+      }
+    });
+  });
+  lista.sort((a,b) => (a.fecha||'').localeCompare(b.fecha||''));
+  return lista;
+}
+
+function getUltimosLabs(p, n) {
+  n = n || 2;
+  const labs = (p.laboratorios || []).slice().sort((a,b) => (b.fecha||'').localeCompare(a.fecha||''));
+  return labs.slice(0, n);
+}
+
+function generarResumenLabs(p) {
+  const labs = getUltimosLabs(p, 2);
+  if (labs.length === 0) return '';
+  return labs.map(l => {
+    const valores = Object.entries(l.valores || {})
+      .filter(([k,v]) => v && String(v).trim())
+      .map(([k,v]) => `${k}: ${v}`)
+      .join(', ');
+    return `${fmtDate(l.fecha)} — ${valores || '(sin valores)'}`;
+  }).join('\n');
+}
+
+function getInterconsultasRespondidas(p) {
+  return (p.interconsultas || [])
+    .filter(ic => ic.respondida)
+    .sort((a,b) => (b.fechaRespuesta||'').localeCompare(a.fechaRespuesta||''));
+}
+
 /* ---------- Sincronización en la nube (Firebase Firestore) ---------- */
 const Sync = {
   app: null,
@@ -674,9 +740,9 @@ const Sync = {
           const remote = snap.exists ? snap.data() : null;
           if (remote && remote.patients) {
             const localStr = JSON.stringify(State.data);
-            const remoteStr = JSON.stringify({ patients: remote.patients, programas: remote.programas || [], lastWrite: remote.lastWrite });
+            const remoteStr = JSON.stringify({ patients: remote.patients, programas: remote.programas || [], egresos: remote.egresos || [], lastWrite: remote.lastWrite });
             if (localStr !== remoteStr) {
-              State.data = { patients: remote.patients, programas: remote.programas || [], lastWrite: remote.lastWrite };
+              State.data = { patients: remote.patients, programas: remote.programas || [], egresos: remote.egresos || [], lastWrite: remote.lastWrite };
               State._migrar();
               try { localStorage.setItem(STORAGE_KEY, JSON.stringify(State.data)); } catch(e){}
               if (App.render) App.render();
@@ -724,6 +790,7 @@ const Sync = {
       const payload = {
         patients: State.data.patients || [],
         programas: State.data.programas || [],
+        egresos: State.data.egresos || [],
         lastWrite: Date.now()
       };
       State.data.lastWrite = payload.lastWrite;
@@ -755,6 +822,7 @@ const State = {
     } catch(e) { console.warn('No se pudo cargar datos', e); }
     if (!this.data.patients) this.data.patients = [];
     if (!this.data.programas) this.data.programas = [];
+    if (!this.data.egresos) this.data.egresos = [];
     this._migrar();
   },
   // Migrar datos antiguos al nuevo formato
@@ -1169,6 +1237,7 @@ service cloud.firestore {
     if (t === 'lista') view.innerHTML = this.renderLista(false);
     else if (t === 'cirugia') view.innerHTML = this.renderCirugia();
     else if (t === 'programa') view.innerHTML = this.renderPrograma();
+    else if (t === 'salidas') view.innerHTML = this.renderSalidas();
     else if (t === 'alertas') view.innerHTML = this.renderAlertas();
     else if (t === 'todos') view.innerHTML = this.renderLista(true);
     this.refreshAlertCount();
@@ -2058,6 +2127,549 @@ service cloud.firestore {
     prg.revisado = true;
     State.save();
     this.closeModal();
+    this.render();
+  },
+
+  /* ============================================================
+     EGRESOS / SALIDAS — reporte de salida del paciente
+     ============================================================ */
+  _currentEgresoId: null,
+
+  renderSalidas() {
+    if (this._currentEgresoId) {
+      return this.renderEgresoDetalle(this._currentEgresoId);
+    }
+    const egresos = (State.data.egresos || []).slice()
+      .sort((a,b) => (b.fechaEgreso||'').localeCompare(a.fechaEgreso||''));
+
+    let html = `
+      <div class="toolbar no-print">
+        <h2 style="margin:0">Egresos / Reportes de salida (${egresos.length})</h2>
+        <div style="flex:1"></div>
+        <button class="btn small" onclick="App.openSelectorEgreso()">+ Nuevo egreso</button>
+      </div>
+    `;
+
+    if (egresos.length === 0) {
+      html += `<div class="empty">
+        <div class="ico">🚪</div>
+        <div>No hay egresos registrados.</div>
+        <div style="margin-top:10px"><button class="btn" onclick="App.openSelectorEgreso()">+ Crear primer egreso</button></div>
+      </div>`;
+      return html;
+    }
+
+    html += egresos.map(eg => {
+      const p = State.data.patients.find(x => x.id === eg.pacienteId);
+      if (!p) return '';
+      const nCir = (eg.cirugiasResumen || []).length;
+      return `
+        <div class="patient-card ready" onclick="App.abrirEgreso('${eg.id}')">
+          <div class="pc-row">
+            <div class="pc-bed">${escapeHtml(p.cama||'?')}</div>
+            <div class="pc-info">
+              <div class="pc-name">${escapeHtml(p.nombre||'(sin nombre)')}
+                <span class="tag green">Egresado ${fmtDate(eg.fechaEgreso)}</span>
+              </div>
+              <div class="pc-meta">
+                ${escapeHtml(p.cedula||'—')} · ${escapeHtml(p.edad||'?')} años · Ingreso: ${fmtDate(p.fechaIngreso)}
+              </div>
+              <div class="pc-meta">
+                <strong>Dx final:</strong> ${escapeHtml(eg.diagnosticoFinal || (p.diagnosticos||[]).join('; ') || '—')}
+              </div>
+              ${nCir>0?`<div class="pc-meta">🔪 ${nCir} cirugía(s) durante hospitalización</div>`:''}
+              ${eg.citaControl && eg.citaControl.fecha
+                ? `<div class="pc-meta">📅 Cita control: ${fmtDate(eg.citaControl.fecha)}${eg.citaControl.lugar?' · '+escapeHtml(eg.citaControl.lugar):''}</div>`
+                : ''}
+              ${eg.rayosXControl && eg.rayosXControl.requiere
+                ? `<div class="pc-meta">📷 Rx control para cita: ${escapeHtml(eg.rayosXControl.descripcion||'sí')}</div>`
+                : ''}
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    return html;
+  },
+
+  /* ---------- Editor del egreso ---------- */
+  renderEgresoDetalle(id) {
+    const eg = (State.data.egresos || []).find(x => x.id === id);
+    if (!eg) { this._currentEgresoId = null; return this.renderSalidas(); }
+    const p = State.data.patients.find(x => x.id === eg.pacienteId);
+    if (!p) {
+      return `<div class="alert-box red">Paciente no encontrado.</div>
+        <div><button class="btn" onclick="App.cerrarEgreso()">← Volver</button></div>`;
+    }
+
+    const diasHosp = daysBetween(p.fechaIngreso, eg.fechaEgreso);
+    const especialidadesComunes = ['Ortopedia','Medicina Interna','Medicina Familiar','Geriatría','Cardiología','Endocrinología','Nefrología','Hematología','Infectología','Cirugía General','Neurocirugía','Vascular Periférico','Rehabilitación','Nutrición','Psiquiatría','Otra'];
+    const lugaresHerida = ['Consulta externa','Centro de salud','Domicilio','Curaciones del hospital','Otro'];
+
+    let html = `
+      <div class="toolbar no-print">
+        <button class="btn ghost small" onclick="App.cerrarEgreso()">← Volver</button>
+        <h2 style="margin:0">Reporte de egreso</h2>
+        <div style="flex:1"></div>
+        <button class="btn ghost small" onclick="window.print()">🖨 Imprimir</button>
+        <button class="btn danger small" onclick="App.eliminarEgreso('${eg.id}')">Eliminar</button>
+      </div>
+
+      <!-- Encabezado para impresión -->
+      <div class="print-only">
+        <div class="print-title">Reporte de Egreso — Servicio de Ortopedia</div>
+        <div class="print-sub">${new Date().toLocaleString('es')}</div>
+      </div>
+
+      <!-- Datos del paciente (solo lectura) -->
+      <div class="card">
+        <h3>Datos del paciente</h3>
+        <div class="muted" style="line-height:1.7">
+          <div><strong>Nombre:</strong> ${escapeHtml(p.nombre||'—')}</div>
+          <div><strong>Cédula:</strong> ${escapeHtml(p.cedula||'—')}</div>
+          <div><strong>Edad:</strong> ${escapeHtml(p.edad||'—')} años · <strong>Sexo:</strong> ${escapeHtml(p.sexo||'—')}</div>
+          <div><strong>Cama:</strong> ${escapeHtml(p.cama||'—')}</div>
+          <div><strong>Fecha de ingreso:</strong> ${fmtDate(p.fechaIngreso)}</div>
+          <div><strong>Fecha de egreso:</strong> ${fmtDate(eg.fechaEgreso)} · <strong>Días hospitalizado:</strong> ${diasHosp}</div>
+          <div><strong>Alergias:</strong> ${escapeHtml(p.alergias||'ninguna registrada')}</div>
+          <div><strong>Antecedentes:</strong> ${escapeHtml(p.antecedentesPatologicos||'ninguno')}</div>
+          <div><strong>Antecedentes quirúrgicos:</strong> ${escapeHtml(p.antecedentesQuirurgicos||'ninguno')}</div>
+          <div><strong>Teléfono:</strong> ${escapeHtml(p.telefono||'—')} · <strong>Contacto:</strong> ${escapeHtml(p.contactoEmergencia||'—')}</div>
+        </div>
+      </div>
+
+      <!-- Fecha de egreso -->
+      <div class="card no-print">
+        <div class="field">
+          <label>Fecha de egreso *</label>
+          <input type="date" value="${escapeHtml(eg.fechaEgreso)}" onchange="App.setEgreso('${eg.id}','fechaEgreso',this.value)">
+        </div>
+      </div>
+
+      <!-- Diagnóstico final y evolución -->
+      <div class="card">
+        <h3>Diagnóstico final</h3>
+        <textarea rows="2" class="no-print" oninput="App.setEgreso('${eg.id}','diagnosticoFinal',this.value)">${escapeHtml(eg.diagnosticoFinal||'')}</textarea>
+        <div class="print-only">${escapeHtml(eg.diagnosticoFinal||'—')}</div>
+      </div>
+
+      <div class="card">
+        <h3>Resumen de evolución</h3>
+        <textarea rows="4" class="no-print" placeholder="Resumen de la hospitalización, complicaciones, manejo recibido…"
+          oninput="App.setEgreso('${eg.id}','resumenEvolucion',this.value)">${escapeHtml(eg.resumenEvolucion||'')}</textarea>
+        <div class="print-only" style="white-space:pre-wrap">${escapeHtml(eg.resumenEvolucion||'—')}</div>
+      </div>
+
+      <!-- Cirugías realizadas -->
+      <div class="card">
+        <div class="row-between">
+          <h3 style="margin:0">Cirugías realizadas durante la hospitalización</h3>
+          <button class="btn ghost small no-print" onclick="App.addCirugiaEgreso('${eg.id}')">+ Agregar</button>
+        </div>
+        ${(eg.cirugiasResumen || []).length === 0
+          ? `<div class="muted" style="margin-top:8px">No se registraron cirugías.</div>`
+          : (eg.cirugiasResumen||[]).map((c, i) => `
+            <div class="card compact" style="margin-top:10px">
+              <div class="field-row">
+                <div class="field" style="margin-bottom:0">
+                  <label>Fecha</label>
+                  <input type="date" value="${escapeHtml(c.fecha||'')}" onchange="App.setCirugiaEgreso('${eg.id}',${i},'fecha',this.value)">
+                </div>
+                <div class="field" style="margin-bottom:0">
+                  <label>Cirujano</label>
+                  <input value="${escapeHtml(c.cirujano||'')}" oninput="App.setCirugiaEgreso('${eg.id}',${i},'cirujano',this.value)">
+                </div>
+              </div>
+              <div class="field" style="margin-top:8px;margin-bottom:0">
+                <label>Procedimiento realizado</label>
+                <textarea rows="2" oninput="App.setCirugiaEgreso('${eg.id}',${i},'procedimiento',this.value)">${escapeHtml(c.procedimiento||'')}</textarea>
+              </div>
+              <div class="field-row" style="margin-top:8px">
+                <div class="field" style="margin-bottom:0">
+                  <label>Lateralidad</label>
+                  <input value="${escapeHtml(c.lateralidad||'')}" oninput="App.setCirugiaEgreso('${eg.id}',${i},'lateralidad',this.value)">
+                </div>
+                <div class="field" style="margin-bottom:0">
+                  <label>Notas / hallazgos</label>
+                  <input value="${escapeHtml(c.notas||'')}" oninput="App.setCirugiaEgreso('${eg.id}',${i},'notas',this.value)">
+                </div>
+              </div>
+              <div style="text-align:right;margin-top:8px">
+                <button class="btn ghost small no-print" onclick="App.removeCirugiaEgreso('${eg.id}',${i})">Eliminar</button>
+              </div>
+            </div>
+          `).join('')}
+
+        <div class="print-only">
+          ${(eg.cirugiasResumen||[]).map((c,i) => `
+            <div style="margin-top:6px">
+              <strong>${i+1}. ${fmtDate(c.fecha)}</strong> — ${escapeHtml(c.procedimiento||'')}${c.lateralidad?' ('+escapeHtml(c.lateralidad)+')':''}
+              ${c.cirujano?` · Cirujano: ${escapeHtml(c.cirujano)}`:''}
+              ${c.notas?`<div style="font-size:.9em">${escapeHtml(c.notas)}</div>`:''}
+            </div>
+          `).join('')}
+        </div>
+      </div>
+
+      <!-- Laboratorios pertinentes -->
+      <div class="card">
+        <h3>Laboratorios de control</h3>
+        <p class="muted no-print" style="font-size:.85rem">Resultados pertinentes al caso (se prellenó con los últimos registrados — puedes editar).</p>
+        <textarea rows="5" class="no-print" placeholder="Ej. 2026-05-07 — Hb: 11.5, Hto: 35, Leu: 8.2, PCR: 12, ..."
+          oninput="App.setEgreso('${eg.id}','laboratoriosResumen',this.value)">${escapeHtml(eg.laboratoriosResumen||'')}</textarea>
+        <div class="print-only" style="white-space:pre-wrap;font-family:monospace;font-size:.9em">${escapeHtml(eg.laboratoriosResumen||'—')}</div>
+      </div>
+
+      <!-- Medicamentos al egreso -->
+      <div class="card">
+        <h3>Medicamentos al egreso</h3>
+        <textarea rows="4" class="no-print" placeholder="Ej.&#10;Acetaminofén 500mg VO c/8h por 7 días&#10;Enoxaparina 40mg SC cada día por 14 días&#10;Cefalexina 500mg VO c/6h por 7 días"
+          oninput="App.setEgreso('${eg.id}','medicamentosEgreso',this.value)">${escapeHtml(eg.medicamentosEgreso||'')}</textarea>
+        <div class="print-only" style="white-space:pre-wrap">${escapeHtml(eg.medicamentosEgreso||'—')}</div>
+      </div>
+
+      <!-- Referencias para citas con especialidades -->
+      <div class="card">
+        <div class="row-between">
+          <h3 style="margin:0">Referencias / citas con otras especialidades</h3>
+          <button class="btn ghost small no-print" onclick="App.addReferenciaEgreso('${eg.id}')">+ Agregar</button>
+        </div>
+        ${(eg.referencias || []).length === 0
+          ? `<div class="muted" style="margin-top:8px">Sin referencias.</div>`
+          : (eg.referencias||[]).map((r, i) => `
+            <div class="card compact" style="margin-top:10px">
+              <div class="field-row">
+                <div class="field" style="margin-bottom:0">
+                  <label>Especialidad</label>
+                  <select onchange="App.setReferenciaEgreso('${eg.id}',${i},'especialidad',this.value)">
+                    ${especialidadesComunes.map(s => `<option value="${s}" ${r.especialidad===s?'selected':''}>${s}</option>`).join('')}
+                  </select>
+                </div>
+                <div class="field" style="margin-bottom:0">
+                  <label>Fecha de cita</label>
+                  <input type="date" value="${escapeHtml(r.fecha||'')}" onchange="App.setReferenciaEgreso('${eg.id}',${i},'fecha',this.value)">
+                </div>
+              </div>
+              <div class="field" style="margin-top:8px;margin-bottom:0">
+                <label>Lugar</label>
+                <input value="${escapeHtml(r.lugar||'')}" placeholder="Consulta externa, hospital, centro de salud…"
+                  oninput="App.setReferenciaEgreso('${eg.id}',${i},'lugar',this.value)">
+              </div>
+              <div class="field" style="margin-top:8px;margin-bottom:0">
+                <label>Notas / motivo</label>
+                <input value="${escapeHtml(r.notas||'')}" oninput="App.setReferenciaEgreso('${eg.id}',${i},'notas',this.value)">
+              </div>
+              <div style="text-align:right;margin-top:8px">
+                <button class="btn ghost small no-print" onclick="App.removeReferenciaEgreso('${eg.id}',${i})">Eliminar</button>
+              </div>
+            </div>
+          `).join('')}
+
+        <div class="print-only">
+          ${(eg.referencias||[]).map(r => `
+            <div style="margin-top:4px">
+              • <strong>${escapeHtml(r.especialidad||'')}</strong>
+              ${r.fecha?` — ${fmtDate(r.fecha)}`:''}
+              ${r.lugar?` · ${escapeHtml(r.lugar)}`:''}
+              ${r.notas?` · ${escapeHtml(r.notas)}`:''}
+            </div>
+          `).join('')}
+        </div>
+      </div>
+
+      <!-- Curación de heridas -->
+      <div class="card">
+        <h3>Curación de heridas</h3>
+        <div class="field-row">
+          <div class="field" style="margin-bottom:0">
+            <label>Lugar donde se realizarán</label>
+            <select onchange="App.setEgresoCuracion('${eg.id}','lugar',this.value)">
+              ${lugaresHerida.map(l => `<option value="${l}" ${(eg.curacionHeridas&&eg.curacionHeridas.lugar)===l?'selected':''}>${l}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>Frecuencia / fechas</label>
+            <input value="${escapeHtml(eg.curacionHeridas&&eg.curacionHeridas.frecuencia||'')}"
+              placeholder="Ej. cada 3 días por 2 semanas; o fechas específicas"
+              oninput="App.setEgresoCuracion('${eg.id}','frecuencia',this.value)">
+          </div>
+        </div>
+        <div class="field" style="margin-top:8px;margin-bottom:0">
+          <label>Instrucciones específicas</label>
+          <textarea rows="2" class="no-print" placeholder="Tipo de cura, materiales, signos de alarma…"
+            oninput="App.setEgresoCuracion('${eg.id}','instrucciones',this.value)">${escapeHtml(eg.curacionHeridas&&eg.curacionHeridas.instrucciones||'')}</textarea>
+          <div class="print-only" style="white-space:pre-wrap">${escapeHtml(eg.curacionHeridas&&eg.curacionHeridas.instrucciones||'—')}</div>
+        </div>
+      </div>
+
+      <!-- Cita de control -->
+      <div class="card">
+        <h3>Cita de control de Ortopedia</h3>
+        <div class="field-row">
+          <div class="field" style="margin-bottom:0">
+            <label>Fecha</label>
+            <input type="date" value="${escapeHtml(eg.citaControl&&eg.citaControl.fecha||'')}"
+              onchange="App.setEgresoCita('${eg.id}','fecha',this.value)">
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>Lugar</label>
+            <input value="${escapeHtml(eg.citaControl&&eg.citaControl.lugar||'')}"
+              placeholder="Ej. Consulta externa Ortopedia, sala 3"
+              oninput="App.setEgresoCita('${eg.id}','lugar',this.value)">
+          </div>
+        </div>
+        <div class="field" style="margin-top:8px;margin-bottom:0">
+          <label>Notas / con quién</label>
+          <input value="${escapeHtml(eg.citaControl&&eg.citaControl.notas||'')}"
+            oninput="App.setEgresoCita('${eg.id}','notas',this.value)">
+        </div>
+      </div>
+
+      <!-- Rayos X de control -->
+      <div class="card">
+        <h3>Rayos X de control para la cita</h3>
+        <div class="checkbox-row">
+          <input type="checkbox" id="rxc-${eg.id}"
+            ${eg.rayosXControl&&eg.rayosXControl.requiere?'checked':''}
+            onchange="App.setEgresoRayos('${eg.id}','requiere',this.checked)">
+          <label for="rxc-${eg.id}"><strong>Requiere Rx de control para la cita</strong></label>
+        </div>
+        ${eg.rayosXControl&&eg.rayosXControl.requiere ? `
+          <div class="field" style="margin-top:8px;margin-bottom:0">
+            <label>¿Cuáles? (proyecciones / estudios)</label>
+            <textarea rows="2" placeholder="Ej. Rx tibia AP y lateral del lado derecho con yeso; Rx pelvis AP, axial cadera…"
+              oninput="App.setEgresoRayos('${eg.id}','descripcion',this.value)">${escapeHtml(eg.rayosXControl.descripcion||'')}</textarea>
+          </div>
+        ` : `<div class="muted" style="margin-top:6px">No requiere Rx para la cita.</div>`}
+      </div>
+
+      <!-- Recomendaciones -->
+      <div class="card">
+        <h3>Recomendaciones generales</h3>
+        <textarea rows="4" class="no-print" placeholder="Reposo, dieta, signos de alarma para regresar a urgencias, fisioterapia, restricciones de carga, etc."
+          oninput="App.setEgreso('${eg.id}','recomendaciones',this.value)">${escapeHtml(eg.recomendaciones||'')}</textarea>
+        <div class="print-only" style="white-space:pre-wrap">${escapeHtml(eg.recomendaciones||'—')}</div>
+      </div>
+
+      <!-- Pie de impresión -->
+      <div class="print-only" style="margin-top:24px;border-top:1px solid #ccc;padding-top:12px">
+        <div style="display:flex;justify-content:space-between;font-size:.9em">
+          <div>Médico responsable: _______________________</div>
+          <div>Firma: _______________________</div>
+        </div>
+        <div style="margin-top:12px;font-size:.85em;color:#666">
+          Reporte generado el ${new Date().toLocaleString('es')} · ${APP_VERSION}
+        </div>
+      </div>
+    `;
+    return html;
+  },
+
+  /* ---------- Acciones del egreso ---------- */
+  abrirEgreso(id) {
+    this._currentEgresoId = id;
+    this.render();
+    window.scrollTo({top:0});
+  },
+  cerrarEgreso() {
+    this._currentEgresoId = null;
+    this.render();
+  },
+
+  openSelectorEgreso() {
+    // Selecciona de la lista TOTAL de pacientes (no egresados aún)
+    const yaConEgreso = new Set((State.data.egresos || []).map(e => e.pacienteId));
+    const candidatos = State.data.patients
+      .filter(p => !p.fechaEgreso)
+      .filter(p => !yaConEgreso.has(p.id))
+      .sort((a,b) => (a.cama||'').localeCompare(b.cama||'', 'es', {numeric:true}));
+
+    const html = `
+      <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
+        <div class="modal" style="max-width:600px">
+          <div class="modal-head">
+            <div>
+              <div style="font-weight:600">Crear reporte de egreso</div>
+              <div style="font-size:.8rem;opacity:.9">Selecciona el paciente al que se le da salida</div>
+            </div>
+            <button class="close-x" onclick="App.closeModal()">✕</button>
+          </div>
+          <div class="modal-body">
+            ${candidatos.length === 0 ? `
+              <div class="empty">
+                <div class="ico">✅</div>
+                <div>No hay pacientes pendientes de egreso.</div>
+                <div class="muted" style="margin-top:8px">Todos los pacientes hospitalizados ya tienen egreso o están dados de alta.</div>
+              </div>
+            ` : candidatos.map(p => {
+              const operado = p.cirugia && p.cirugia.realizada;
+              const dpost = diasPostop(p);
+              const dias = daysBetween(p.fechaIngreso);
+              return `
+                <div class="patient-card" onclick="App.crearEgreso('${p.id}')">
+                  <div class="pc-row">
+                    <div class="pc-bed">${escapeHtml(p.cama||'?')}</div>
+                    <div class="pc-info">
+                      <div class="pc-name">${escapeHtml(p.nombre||'(sin nombre)')}
+                        ${operado?`<span class="tag green">Operado · día ${dpost} postop</span>`:''}
+                      </div>
+                      <div class="pc-meta">${escapeHtml(p.cedula||'—')} · ${escapeHtml(p.edad||'?')} años · ${dias} día(s) hosp.</div>
+                      <div class="pc-meta"><strong>Dx:</strong> ${escapeHtml((p.diagnosticos||[]).join(', ')||'—')}</div>
+                    </div>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+          <div class="modal-foot">
+            <button class="btn ghost" onclick="App.closeModal()">Cancelar</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.getElementById('modalRoot').innerHTML = html;
+  },
+
+  crearEgreso(pacienteId) {
+    const p = this._findP(pacienteId);
+    if (!p) return;
+    if (!State.data.egresos) State.data.egresos = [];
+    const eg = nuevoEgreso(pacienteId);
+    // Prefill cirugías
+    eg.cirugiasResumen = getCirugiasDelPaciente(pacienteId);
+    if (eg.cirugiasResumen.length === 0 && p.cirugia && p.cirugia.realizada) {
+      eg.cirugiasResumen.push({
+        fecha: p.cirugia.fecha,
+        procedimiento: p.cirugia.procedimiento,
+        lateralidad: p.cirugia.lateralidad,
+        cirujano: p.cirugia.cirujano,
+        quirofano: '',
+        notas: p.cirugia.notas || ''
+      });
+    }
+    // Prefill labs
+    eg.laboratoriosResumen = generarResumenLabs(p);
+    // Prefill referencias desde interconsultas respondidas
+    eg.referencias = getInterconsultasRespondidas(p).map(ic => ({
+      especialidad: ic.servicio || '',
+      fecha: '',
+      lugar: '',
+      notas: ic.respuesta ? ic.respuesta.slice(0, 80) : ''
+    }));
+    // Prefill diagnóstico final
+    eg.diagnosticoFinal = (p.diagnosticos || []).join('; ');
+
+    State.data.egresos.push(eg);
+    p.fechaEgreso = eg.fechaEgreso;
+    logCambio(p, 'Egreso', 'Reporte de egreso creado');
+    State.save();
+    this.closeModal();
+    this.abrirEgreso(eg.id);
+  },
+
+  setEgreso(id, campo, val) {
+    const eg = State.data.egresos.find(x => x.id === id);
+    if (!eg) return;
+    eg[campo] = val;
+    eg.modificado = new Date().toISOString();
+    if (campo === 'fechaEgreso') {
+      const p = State.data.patients.find(x => x.id === eg.pacienteId);
+      if (p) p.fechaEgreso = val;
+    }
+    State.save();
+  },
+
+  setEgresoCita(id, campo, val) {
+    const eg = State.data.egresos.find(x => x.id === id);
+    if (!eg) return;
+    if (!eg.citaControl) eg.citaControl = { fecha:'', lugar:'', especialidad:'Ortopedia', notas:'' };
+    eg.citaControl[campo] = val;
+    eg.modificado = new Date().toISOString();
+    State.save();
+  },
+
+  setEgresoCuracion(id, campo, val) {
+    const eg = State.data.egresos.find(x => x.id === id);
+    if (!eg) return;
+    if (!eg.curacionHeridas) eg.curacionHeridas = { lugar:'', frecuencia:'', instrucciones:'' };
+    eg.curacionHeridas[campo] = val;
+    eg.modificado = new Date().toISOString();
+    State.save();
+  },
+
+  setEgresoRayos(id, campo, val) {
+    const eg = State.data.egresos.find(x => x.id === id);
+    if (!eg) return;
+    if (!eg.rayosXControl) eg.rayosXControl = { requiere:false, descripcion:'' };
+    eg.rayosXControl[campo] = val;
+    eg.modificado = new Date().toISOString();
+    State.save();
+    if (campo === 'requiere') this.render();
+  },
+
+  addCirugiaEgreso(id) {
+    const eg = State.data.egresos.find(x => x.id === id);
+    if (!eg) return;
+    if (!eg.cirugiasResumen) eg.cirugiasResumen = [];
+    eg.cirugiasResumen.push({ fecha:'', procedimiento:'', lateralidad:'', cirujano:'', quirofano:'', notas:'' });
+    State.save();
+    this.render();
+  },
+  setCirugiaEgreso(id, idx, campo, val) {
+    const eg = State.data.egresos.find(x => x.id === id);
+    if (!eg) return;
+    if (!eg.cirugiasResumen[idx]) return;
+    eg.cirugiasResumen[idx][campo] = val;
+    eg.modificado = new Date().toISOString();
+    State.save();
+  },
+  removeCirugiaEgreso(id, idx) {
+    if (!confirm('¿Quitar esta cirugía del reporte?')) return;
+    const eg = State.data.egresos.find(x => x.id === id);
+    if (!eg) return;
+    eg.cirugiasResumen.splice(idx, 1);
+    State.save();
+    this.render();
+  },
+
+  addReferenciaEgreso(id) {
+    const eg = State.data.egresos.find(x => x.id === id);
+    if (!eg) return;
+    if (!eg.referencias) eg.referencias = [];
+    eg.referencias.push({ especialidad:'Ortopedia', fecha:'', lugar:'', notas:'' });
+    State.save();
+    this.render();
+  },
+  setReferenciaEgreso(id, idx, campo, val) {
+    const eg = State.data.egresos.find(x => x.id === id);
+    if (!eg || !eg.referencias[idx]) return;
+    eg.referencias[idx][campo] = val;
+    eg.modificado = new Date().toISOString();
+    State.save();
+  },
+  removeReferenciaEgreso(id, idx) {
+    if (!confirm('¿Quitar esta referencia?')) return;
+    const eg = State.data.egresos.find(x => x.id === id);
+    if (!eg) return;
+    eg.referencias.splice(idx, 1);
+    State.save();
+    this.render();
+  },
+
+  eliminarEgreso(id) {
+    if (!confirm('¿Eliminar este reporte de egreso? El paciente queda sin egreso registrado y vuelve a la lista de hospitalizados.')) return;
+    const eg = State.data.egresos.find(x => x.id === id);
+    if (eg) {
+      const p = State.data.patients.find(x => x.id === eg.pacienteId);
+      if (p) {
+        p.fechaEgreso = '';
+        logCambio(p, 'Egreso', 'Reporte de egreso eliminado — paciente reactivo');
+      }
+    }
+    State.data.egresos = State.data.egresos.filter(x => x.id !== id);
+    State.save();
+    this._currentEgresoId = null;
     this.render();
   },
 
