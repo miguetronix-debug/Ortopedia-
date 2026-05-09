@@ -4,14 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#0f4c75">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>Control de Pacientes - Servicio de Ortopedia</title>
-<script type="module">
-  import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js';
-  import { getFirestore, doc, setDoc, onSnapshot, enableIndexedDbPersistence }
-    from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js';
-  window.FB = { initializeApp, getFirestore, doc, setDoc, onSnapshot, enableIndexedDbPersistence };
-  window.dispatchEvent(new Event('firebase-ready'));
-</script>
+<!-- Firebase SDK (versión compat — más estable en Safari/iOS) -->
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js"></script>
 <style>
   /* ---------- Reset & base ---------- */
   *, *::before, *::after { box-sizing: border-box; }
@@ -363,7 +362,7 @@
   <div class="appbar-row">
     <div>
       <div class="appbar-title">Control de Pacientes</div>
-      <div class="appbar-sub">Servicio de Ortopedia</div>
+      <div class="appbar-sub">Servicio de Ortopedia · <span id="appVersionLabel"></span></div>
     </div>
     <div class="row-gap no-print">
       <span class="sync-status local" id="syncStatus" title="Estado de sincronización" onclick="App.openSetup()">
@@ -397,9 +396,22 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
+const APP_VERSION = 'v1.3-embed-2026-05-08';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
+
+// Configuración de Firebase embebida — todos los dispositivos que abran esta URL
+// se conectan automáticamente al mismo proyecto, sin necesidad de configurar nada.
+const EMBEDDED_FB_CONFIG = {
+  apiKey: "AIzaSyCKbRptktjhE3kob9VADWzeCpke8NoM5JE",
+  authDomain: "ortopedia-113f8.firebaseapp.com",
+  projectId: "ortopedia-113f8",
+  storageBucket: "ortopedia-113f8.firebasestorage.app",
+  messagingSenderId: "653477762575",
+  appId: "1:653477762575:web:a7b008dea2219f9289357a",
+  measurementId: "G-62QNQX4VGZ"
+};
 const SPECIALIDADES_PREOP = [
   'Medicina Interna', 'Medicina Familiar', 'Geriatría',
   'Cardiología', 'Neumología', 'Endocrinología',
@@ -482,8 +494,16 @@ const Sync = {
   ignoreNextRemote: false,  // para evitar loops cuando recibimos eco propio
 
   getConfig() {
-    try { return JSON.parse(localStorage.getItem(FB_CONFIG_KEY) || 'null'); }
-    catch(e) { return null; }
+    // 1. Configuración guardada localmente (override manual)
+    try {
+      const stored = JSON.parse(localStorage.getItem(FB_CONFIG_KEY) || 'null');
+      if (stored && stored.apiKey && stored.projectId) return stored;
+    } catch(e) {}
+    // 2. Configuración embebida en la app (default — para que todos compartan datos)
+    if (EMBEDDED_FB_CONFIG && EMBEDDED_FB_CONFIG.apiKey && EMBEDDED_FB_CONFIG.projectId) {
+      return EMBEDDED_FB_CONFIG;
+    }
+    return null;
   },
   setConfig(cfg) {
     if (cfg) localStorage.setItem(FB_CONFIG_KEY, JSON.stringify(cfg));
@@ -514,55 +534,61 @@ const Sync = {
       this.setStatus('local');
       return false;
     }
-    if (!window.FB) {
-      // SDK aún no listo
-      await new Promise(res => window.addEventListener('firebase-ready', res, { once:true }));
+    // Esperar a que el SDK de Firebase termine de cargar (con timeout)
+    this.setStatus('connecting');
+    const start = Date.now();
+    while (typeof window.firebase === 'undefined' && Date.now() - start < 10000) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+    if (typeof window.firebase === 'undefined') {
+      this.setStatus('error', 'No se pudo cargar Firebase. ¿Hay conexión a internet?');
+      return false;
     }
     try {
-      this.setStatus('connecting');
-      this.app = window.FB.initializeApp(cfg);
-      this.db = window.FB.getFirestore(this.app);
-      try { await window.FB.enableIndexedDbPersistence(this.db); } catch(e) { /* ya activado o no soportado */ }
+      // Inicializar app (evitar duplicados)
+      if (window.firebase.apps && window.firebase.apps.length > 0) {
+        this.app = window.firebase.apps[0];
+      } else {
+        this.app = window.firebase.initializeApp(cfg);
+      }
+      this.db = window.firebase.firestore();
 
-      const ref = window.FB.doc(this.db, FB_DOC_PATH);
-      this.unsubscribe = window.FB.onSnapshot(ref,
+      // Persistencia offline (puede fallar en modo incógnito o múltiples pestañas — no es crítico)
+      try { await this.db.enablePersistence({ synchronizeTabs: true }); }
+      catch(e) { console.warn('Persistencia offline no activa:', e.code || e.message); }
+
+      const ref = this.db.doc(FB_DOC_PATH);
+      this.unsubscribe = ref.onSnapshot(
         (snap) => {
           this.setStatus('online');
           if (this.ignoreNextRemote) {
             this.ignoreNextRemote = false;
             return;
           }
-          const remote = snap.exists() ? snap.data() : null;
+          const remote = snap.exists ? snap.data() : null;
           if (remote && remote.patients) {
-            // Sólo actualizar si es realmente diferente (timestamp/lastWrite)
             const localStr = JSON.stringify(State.data);
             const remoteStr = JSON.stringify({ patients: remote.patients, lastWrite: remote.lastWrite });
             if (localStr !== remoteStr) {
               State.data = { patients: remote.patients, lastWrite: remote.lastWrite };
               try { localStorage.setItem(STORAGE_KEY, JSON.stringify(State.data)); } catch(e){}
               if (App.render) App.render();
-              // Si hay un modal abierto, refrescarlo
-              const open = document.querySelector('.modal-backdrop');
-              if (open) {
-                const idMatch = open.outerHTML.match(/openPaciente\('([^']+)'\)/);
-                // El modal se mantiene si el paciente sigue existiendo
-                if (App._currentModalId && State.data.patients.some(p=>p.id===App._currentModalId)) {
-                  App.renderModal(App._currentModalId);
-                } else if (App._currentModalId) {
-                  App.closeModal();
-                }
+              if (App._currentModalId && State.data.patients.some(p=>p.id===App._currentModalId)) {
+                App.renderModal(App._currentModalId);
+              } else if (App._currentModalId) {
+                App.closeModal();
               }
             }
-          } else if (!snap.exists()) {
+          } else if (snap && !snap.exists) {
             // Documento no existe; subir lo local
             this.pushNow();
           }
         },
         (err) => {
           console.error('Firestore error:', err);
-          this.setStatus('error', 'Error: ' + (err.code||err.message||''));
+          this.setStatus('error', 'Error: ' + (err.code || err.message || ''));
           alert('Error de Firebase: ' + (err.message || err.code) +
-            '\n\nVerifica las reglas de Firestore y la configuración.');
+            '\n\nVerifica las reglas de Firestore en la consola.');
         }
       );
 
@@ -586,14 +612,14 @@ const Sync = {
   async pushNow() {
     if (!this.db) return;
     try {
-      const ref = window.FB.doc(this.db, FB_DOC_PATH);
+      const ref = this.db.doc(FB_DOC_PATH);
       this.ignoreNextRemote = true;
       const payload = {
         patients: State.data.patients || [],
         lastWrite: Date.now()
       };
       State.data.lastWrite = payload.lastWrite;
-      await window.FB.setDoc(ref, payload);
+      await ref.set(payload);
     } catch(e) {
       console.error('Error guardando en la nube:', e);
       this.ignoreNextRemote = false;
@@ -764,19 +790,18 @@ const App = {
   _currentModalId: null,
 
   async init() {
+    // Mostrar versión visible
+    const v = document.getElementById('appVersionLabel');
+    if (v) v.textContent = APP_VERSION;
+
     State.load();
     this.switchTab('lista');
     this.refreshAlertCount();
-    // Intentar conectar a la nube si hay configuración
+    // Conectar automáticamente — la app trae configuración Firebase embebida
     if (Sync.getConfig()) {
       await Sync.connect();
     } else {
-      // Mostrar pantalla de bienvenida con la opción de configurar
       Sync.setStatus('local');
-      // Si es la primera vez (sin pacientes), invitar a configurar
-      if ((State.data.patients||[]).length === 0) {
-        this.openSetup(true);
-      }
     }
   },
 
@@ -802,6 +827,17 @@ const App = {
                 status==='offline'?'Sin conexión - cambios se sincronizarán al reconectar':
                 'Conectando…'
               }</strong>
+            </div>
+            <div class="alert-box blue" style="font-size:.82rem">
+              <div><strong>Versión cargada:</strong> ${APP_VERSION}</div>
+              <div><strong>Config embebida:</strong> ${
+                (typeof EMBEDDED_FB_CONFIG === 'object' && EMBEDDED_FB_CONFIG && EMBEDDED_FB_CONFIG.apiKey)
+                  ? '✓ Sí (proyecto: ' + escapeHtml(EMBEDDED_FB_CONFIG.projectId||'?') + ')'
+                  : '✗ No — el archivo cargado no la trae'
+              }</div>
+              <div><strong>Firebase SDK:</strong> ${
+                typeof window.firebase !== 'undefined' ? '✓ Cargado' : '✗ No cargado'
+              }</div>
             </div>
 
             <div class="setup-step">
