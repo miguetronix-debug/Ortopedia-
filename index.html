@@ -1,0 +1,2007 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0f4c75">
+<title>Control de Pacientes - Servicio de Ortopedia</title>
+<script type="module">
+  import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js';
+  import { getFirestore, doc, setDoc, onSnapshot, enableIndexedDbPersistence }
+    from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js';
+  window.FB = { initializeApp, getFirestore, doc, setDoc, onSnapshot, enableIndexedDbPersistence };
+  window.dispatchEvent(new Event('firebase-ready'));
+</script>
+<style>
+  /* ---------- Reset & base ---------- */
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: #f3f5f8;
+    color: #1f2937;
+    font-size: 15px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3, h4 { margin: 0 0 .5em; line-height: 1.2; }
+  h1 { font-size: 1.25rem; }
+  h2 { font-size: 1.1rem; color: #0f4c75; }
+  h3 { font-size: 1rem; color: #0f4c75; }
+  h4 { font-size: .9rem; color: #374151; text-transform: uppercase; letter-spacing: .04em; }
+  a { color: #0f4c75; }
+  button { font: inherit; cursor: pointer; }
+
+  /* ---------- App shell ---------- */
+  header.appbar {
+    background: linear-gradient(135deg, #0f4c75, #3282b8);
+    color: white;
+    padding: 12px 16px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    box-shadow: 0 2px 6px rgba(0,0,0,.12);
+  }
+  .appbar-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+  }
+  .appbar-title { font-weight: 600; font-size: 1.05rem; }
+  .appbar-sub { font-size: .8rem; opacity: .9; }
+  nav.tabs {
+    display: flex; flex-wrap: wrap; gap: 4px;
+    background: #0f4c75;
+    padding: 0 8px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    position: sticky;
+    top: 64px;
+    z-index: 99;
+  }
+  nav.tabs::-webkit-scrollbar { display: none; }
+  nav.tabs button {
+    background: transparent;
+    border: none;
+    color: #cfe3f3;
+    padding: 12px 14px;
+    font-size: .9rem;
+    border-bottom: 3px solid transparent;
+    white-space: nowrap;
+  }
+  nav.tabs button.active {
+    color: white;
+    border-bottom-color: #ffd166;
+    font-weight: 600;
+  }
+  nav.tabs .badge {
+    display: inline-block;
+    background: #e63946;
+    color: white;
+    font-size: .7rem;
+    border-radius: 10px;
+    padding: 1px 7px;
+    margin-left: 5px;
+    font-weight: 700;
+  }
+
+  main { padding: 16px; max-width: 1200px; margin: 0 auto; }
+
+  /* ---------- Buttons ---------- */
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: #0f4c75; color: white; border: none;
+    padding: 9px 14px; border-radius: 8px; font-size: .9rem; font-weight: 500;
+    transition: background .15s ease, transform .05s ease;
+  }
+  .btn:hover { background: #103e60; }
+  .btn:active { transform: translateY(1px); }
+  .btn.secondary { background: #4b5563; }
+  .btn.secondary:hover { background: #374151; }
+  .btn.success { background: #059669; }
+  .btn.success:hover { background: #047857; }
+  .btn.danger { background: #dc2626; }
+  .btn.danger:hover { background: #b91c1c; }
+  .btn.ghost { background: transparent; color: #0f4c75; border: 1px solid #cbd5e1; }
+  .btn.ghost:hover { background: #eef2f7; }
+  .btn.small { padding: 5px 10px; font-size: .8rem; }
+  .btn.full { width: 100%; justify-content: center; }
+
+  /* ---------- Cards & layout ---------- */
+  .card {
+    background: white; border-radius: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06);
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .card.compact { padding: 12px; }
+  .grid { display: grid; gap: 12px; }
+  .grid.cols-2 { grid-template-columns: 1fr 1fr; }
+  .grid.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+  @media (max-width: 700px) {
+    .grid.cols-2, .grid.cols-3 { grid-template-columns: 1fr; }
+  }
+  .toolbar {
+    display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; align-items: center;
+  }
+  .toolbar input[type="search"] {
+    flex: 1; min-width: 160px;
+  }
+
+  /* ---------- Forms ---------- */
+  label { display: block; font-size: .82rem; color: #374151; margin-bottom: 4px; font-weight: 500; }
+  input, select, textarea {
+    width: 100%;
+    padding: 9px 11px;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    font: inherit;
+    background: white;
+    color: #111827;
+  }
+  input:focus, select:focus, textarea:focus {
+    outline: none; border-color: #3282b8; box-shadow: 0 0 0 3px rgba(50,130,184,.18);
+  }
+  textarea { resize: vertical; min-height: 64px; }
+  .field { margin-bottom: 12px; }
+  .field-row { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 600px) { .field-row { grid-template-columns: 1fr; } }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .checkbox-row input { width: auto; }
+  .checkbox-row label { margin: 0; font-weight: 400; }
+
+  /* ---------- Patient cards ---------- */
+  .patient-card {
+    background: white;
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+    border-left: 5px solid #cbd5e1;
+    box-shadow: 0 1px 3px rgba(0,0,0,.05);
+    cursor: pointer;
+    transition: transform .1s, box-shadow .1s;
+  }
+  .patient-card:hover { transform: translateX(2px); box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+  .patient-card.ready { border-left-color: #059669; }
+  .patient-card.alert { border-left-color: #dc2626; background: #fef2f2; }
+  .patient-card.warn { border-left-color: #f59e0b; }
+  .pc-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+  .pc-bed {
+    background: #0f4c75; color: white;
+    width: 42px; height: 42px;
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 1rem;
+    flex-shrink: 0;
+  }
+  .pc-info { flex: 1; min-width: 0; }
+  .pc-name { font-weight: 600; color: #0f172a; font-size: 1rem; }
+  .pc-meta { font-size: .82rem; color: #6b7280; margin-top: 2px; }
+  .pc-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .tag {
+    display: inline-block;
+    font-size: .72rem;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #e5e7eb;
+    color: #374151;
+    font-weight: 500;
+  }
+  .tag.green { background: #d1fae5; color: #065f46; }
+  .tag.red { background: #fee2e2; color: #991b1b; }
+  .tag.yellow { background: #fef3c7; color: #92400e; }
+  .tag.blue { background: #dbeafe; color: #1e3a8a; }
+  .tag.gray { background: #e5e7eb; color: #374151; }
+
+  /* ---------- Modal ---------- */
+  .modal-backdrop {
+    position: fixed; inset: 0;
+    background: rgba(15,23,42,.55);
+    z-index: 200;
+    display: flex; align-items: flex-start; justify-content: center;
+    padding: 0;
+    overflow-y: auto;
+  }
+  .modal {
+    background: #f9fafb;
+    width: 100%;
+    max-width: 900px;
+    margin: 20px auto;
+    border-radius: 14px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.25);
+    overflow: hidden;
+    min-height: calc(100vh - 40px);
+  }
+  @media (max-width: 800px) {
+    .modal { margin: 0; border-radius: 0; min-height: 100vh; }
+  }
+  .modal-head {
+    background: linear-gradient(135deg, #0f4c75, #3282b8);
+    color: white; padding: 14px 16px;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    position: sticky; top: 0; z-index: 5;
+  }
+  .modal-body { padding: 16px; }
+  .modal-foot {
+    padding: 12px 16px;
+    background: white;
+    border-top: 1px solid #e5e7eb;
+    display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap;
+    position: sticky; bottom: 0;
+  }
+  .close-x {
+    background: rgba(255,255,255,.15);
+    color: white; border: none;
+    width: 34px; height: 34px;
+    border-radius: 50%;
+    font-size: 1.2rem;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  /* Sub-tabs inside modal */
+  .subtabs {
+    display: flex; flex-wrap: wrap; gap: 2px;
+    background: white;
+    border-bottom: 1px solid #e5e7eb;
+    padding: 0 8px;
+    overflow-x: auto;
+  }
+  .subtabs button {
+    background: transparent; border: none;
+    padding: 10px 12px;
+    color: #6b7280; font-size: .85rem;
+    border-bottom: 2px solid transparent;
+    white-space: nowrap;
+  }
+  .subtabs button.active {
+    color: #0f4c75; border-bottom-color: #0f4c75; font-weight: 600;
+  }
+
+  /* ---------- Tables ---------- */
+  table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+  table thead { background: #f1f5f9; }
+  table th, table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #e5e7eb; }
+  table th { font-weight: 600; color: #334155; font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; }
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  /* ---------- Alerts ---------- */
+  .alert-box {
+    padding: 10px 12px; border-radius: 8px; margin-bottom: 10px;
+    border-left: 4px solid;
+  }
+  .alert-box.red { background: #fef2f2; border-color: #dc2626; color: #7f1d1d; }
+  .alert-box.yellow { background: #fffbeb; border-color: #f59e0b; color: #78350f; }
+  .alert-box.green { background: #ecfdf5; border-color: #059669; color: #065f46; }
+  .alert-box.blue { background: #eff6ff; border-color: #3282b8; color: #1e3a8a; }
+
+  /* ---------- Empty state ---------- */
+  .empty {
+    text-align: center; padding: 32px 16px; color: #6b7280;
+  }
+  .empty .ico { font-size: 2.5rem; margin-bottom: 8px; opacity: .5; }
+
+  /* ---------- Tiny utilities ---------- */
+  .muted { color: #6b7280; font-size: .85rem; }
+  .strong { font-weight: 600; }
+  .row-between { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .row-gap { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .pill {
+    display: inline-block; padding: 3px 9px; border-radius: 999px;
+    font-size: .75rem; font-weight: 600;
+  }
+  .pill.ready { background: #d1fae5; color: #065f46; }
+  .pill.notready { background: #fee2e2; color: #991b1b; }
+  .pill.pending { background: #fef3c7; color: #92400e; }
+  .lab-table input { padding: 4px 6px; font-size: .85rem; }
+  hr { border: none; border-top: 1px solid #e5e7eb; margin: 14px 0; }
+
+  /* ---------- Print ---------- */
+  @media print {
+    @page { size: A4; margin: 12mm; }
+    body { background: white; font-size: 11px; }
+    header.appbar, nav.tabs, .toolbar, .no-print, .btn, .modal-foot { display: none !important; }
+    main { padding: 0; max-width: none; }
+    .card { box-shadow: none; border: 1px solid #ccc; padding: 8px; margin-bottom: 8px; page-break-inside: avoid; }
+    .patient-card { border: 1px solid #ccc; box-shadow: none; page-break-inside: avoid; margin-bottom: 6px; }
+    table { font-size: 10px; }
+    .print-only { display: block !important; }
+    .print-title { font-size: 14pt; font-weight: 700; margin-bottom: 8px; text-align: center; }
+    .print-sub { font-size: 10pt; text-align: center; margin-bottom: 12px; color: #555; }
+  }
+  .print-only { display: none; }
+
+  /* ---------- Mobile tweaks ---------- */
+  @media (max-width: 500px) {
+    main { padding: 10px; }
+    .appbar-title { font-size: 1rem; }
+    nav.tabs button { padding: 10px 10px; font-size: .82rem; }
+    .pc-bed { width: 38px; height: 38px; font-size: .9rem; }
+  }
+
+  /* ---------- Sync status ---------- */
+  .sync-status {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: .75rem;
+    padding: 3px 8px;
+    border-radius: 12px;
+    background: rgba(255,255,255,.18);
+  }
+  .sync-status .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #f59e0b;
+    box-shadow: 0 0 4px currentColor;
+  }
+  .sync-status.online .dot { background: #10b981; }
+  .sync-status.offline .dot { background: #ef4444; }
+  .sync-status.local .dot { background: #94a3b8; box-shadow: none; }
+
+  /* Setup screen */
+  .setup-wrap {
+    max-width: 720px; margin: 24px auto;
+  }
+  .setup-step {
+    background: white; padding: 16px; border-radius: 10px;
+    margin-bottom: 12px; border-left: 4px solid #3282b8;
+  }
+  .setup-step h3 { color: #0f4c75; }
+  .code-block {
+    background: #0f172a; color: #e2e8f0;
+    padding: 12px; border-radius: 8px;
+    font-family: 'Courier New', monospace; font-size: .8rem;
+    overflow-x: auto;
+    white-space: pre;
+    margin: 8px 0;
+  }
+  .copy-btn {
+    background: #1e293b; color: #cbd5e1;
+    border: 1px solid #334155; border-radius: 6px;
+    padding: 4px 10px; font-size: .75rem; margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+
+<header class="appbar">
+  <div class="appbar-row">
+    <div>
+      <div class="appbar-title">Control de Pacientes</div>
+      <div class="appbar-sub">Servicio de Ortopedia</div>
+    </div>
+    <div class="row-gap no-print">
+      <span class="sync-status local" id="syncStatus" title="Estado de sincronización" onclick="App.openSetup()">
+        <span class="dot"></span><span id="syncText">Sin nube</span>
+      </span>
+      <button class="btn small" onclick="App.openNew()">+ Paciente</button>
+      <button class="btn ghost small" onclick="App.exportData()">Exportar</button>
+      <button class="btn ghost small" onclick="document.getElementById('importFile').click()">Importar</button>
+      <button class="btn ghost small" onclick="App.openSetup()">⚙</button>
+      <input type="file" id="importFile" accept="application/json" style="display:none" onchange="App.importData(event)">
+    </div>
+  </div>
+</header>
+
+<nav class="tabs no-print" id="tabs">
+  <button data-tab="lista" class="active" onclick="App.switchTab('lista')">Pase de visita</button>
+  <button data-tab="cirugia" onclick="App.switchTab('cirugia')">Listos para cirugía</button>
+  <button data-tab="alertas" onclick="App.switchTab('alertas')">Alertas <span class="badge" id="alertCount" style="display:none">0</span></button>
+  <button data-tab="todos" onclick="App.switchTab('todos')">Todos</button>
+</nav>
+
+<main>
+  <div id="view"></div>
+</main>
+
+<div id="modalRoot"></div>
+
+<script>
+/* =========================================================
+   Control de Pacientes - Servicio de Ortopedia
+   Datos en localStorage; export/import JSON; sin backend.
+   ========================================================= */
+
+const STORAGE_KEY = 'ortopedia_v1';
+const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
+const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
+const SPECIALIDADES_PREOP = [
+  'Medicina Interna', 'Medicina Familiar', 'Geriatría',
+  'Cardiología', 'Neumología', 'Endocrinología',
+  'Nefrología', 'Hematología', 'Otra'
+];
+const SERVICIOS_INTERCONSULTA = [
+  'Medicina Interna','Medicina Familiar','Geriatría','Cardiología','Neumología',
+  'Endocrinología','Nefrología','Hematología','Infectología','Anestesiología',
+  'Cirugía General','Neurocirugía','Urología','Vascular Periférico',
+  'Psiquiatría','Nutrición','Rehabilitación','Otro'
+];
+
+/* ---------- Utilidades ---------- */
+const uid = () => 'p_' + Date.now().toString(36) + Math.random().toString(36).slice(2,8);
+const todayISO = () => new Date().toISOString().slice(0,10);
+const fmtDate = (iso) => {
+  if (!iso) return '—';
+  const d = new Date(iso + (iso.length===10?'T00:00:00':''));
+  if (isNaN(d)) return iso;
+  return d.toLocaleDateString('es', { day:'2-digit', month:'short', year:'numeric' });
+};
+const daysBetween = (a, b) => {
+  if (!a) return 0;
+  const A = new Date(a + (a.length===10?'T00:00:00':''));
+  const B = b ? new Date(b + (b.length===10?'T00:00:00':'')) : new Date();
+  return Math.floor((B - A) / (1000*60*60*24));
+};
+const escapeHtml = (s) => (s==null?'':String(s)).replace(/[&<>"']/g, c => ({
+  '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+}[c]));
+
+/* ---------- Modelo ---------- */
+function nuevoPaciente() {
+  return {
+    id: uid(),
+    nombre: '',
+    cedula: '',
+    edad: '',
+    sexo: '',
+    cama: '',
+    telefono: '',
+    contactoEmergencia: '',
+    fechaIngreso: todayISO(),
+    fechaEgreso: '',
+    cirujano: '',
+    diagnosticos: [],
+    alergias: '',
+    antecedentesPatologicos: '',
+    antecedentesQuirurgicos: '',
+    medicamentosPrevios: '',
+    observaciones: '',
+    contraindicaciones: {
+      malEstadoGeneral: false,
+      malEstadoTejidos: false,
+      otra: ''
+    },
+    estudios: {
+      rxTorax: { realizado:false, fecha:'', resultado:'' },
+      hemograma: { realizado:false, fecha:'', resultado:'' },
+      tiemposCoagulacion: { realizado:false, fecha:'', resultado:'' },
+      quimicaSanguinea: { realizado:false, fecha:'', resultado:'' },
+      ekg: { realizado:false, fecha:'', resultado:'' },
+      evaluacionPreop: { realizado:false, fecha:'', especialidad:'', resultado:'' }
+    },
+    medicamentos: [],   // {id,nombre,dosis,via,frecuencia,inicio,fin,activo,nota}
+    laboratorios: [],   // {id, fecha, valores:{Hb,Hct,Leu,Plt,Cr,BUN,Glu,Na,K,Ca,PCR,VES,...}, nota}
+    interconsultas: [], // {id,fechaSolicitud,servicio,motivo,respondida,fechaRespuesta,respuesta}
+    controlInfeccion: [], // {fecha,rxRepetido,examenesRepetidos,nota}
+    historial: []       // {fecha, accion, detalle}
+  };
+}
+
+/* ---------- Sincronización en la nube (Firebase Firestore) ---------- */
+const Sync = {
+  app: null,
+  db: null,
+  unsubscribe: null,
+  status: 'local',          // 'local' | 'connecting' | 'online' | 'offline' | 'error'
+  saveTimeout: null,
+  ignoreNextRemote: false,  // para evitar loops cuando recibimos eco propio
+
+  getConfig() {
+    try { return JSON.parse(localStorage.getItem(FB_CONFIG_KEY) || 'null'); }
+    catch(e) { return null; }
+  },
+  setConfig(cfg) {
+    if (cfg) localStorage.setItem(FB_CONFIG_KEY, JSON.stringify(cfg));
+    else localStorage.removeItem(FB_CONFIG_KEY);
+  },
+
+  setStatus(s, msg) {
+    this.status = s;
+    const el = document.getElementById('syncStatus');
+    const tx = document.getElementById('syncText');
+    if (!el) return;
+    el.classList.remove('online','offline','local');
+    const map = {
+      local: ['local', 'Sin nube'],
+      connecting: ['', 'Conectando…'],
+      online: ['online', 'Sincronizado'],
+      offline: ['offline', 'Sin conexión'],
+      error: ['offline', msg || 'Error']
+    };
+    const [cls, label] = map[s] || ['', s];
+    if (cls) el.classList.add(cls);
+    tx.textContent = label;
+  },
+
+  async connect() {
+    const cfg = this.getConfig();
+    if (!cfg || !cfg.apiKey || !cfg.projectId) {
+      this.setStatus('local');
+      return false;
+    }
+    if (!window.FB) {
+      // SDK aún no listo
+      await new Promise(res => window.addEventListener('firebase-ready', res, { once:true }));
+    }
+    try {
+      this.setStatus('connecting');
+      this.app = window.FB.initializeApp(cfg);
+      this.db = window.FB.getFirestore(this.app);
+      try { await window.FB.enableIndexedDbPersistence(this.db); } catch(e) { /* ya activado o no soportado */ }
+
+      const ref = window.FB.doc(this.db, FB_DOC_PATH);
+      this.unsubscribe = window.FB.onSnapshot(ref,
+        (snap) => {
+          this.setStatus('online');
+          if (this.ignoreNextRemote) {
+            this.ignoreNextRemote = false;
+            return;
+          }
+          const remote = snap.exists() ? snap.data() : null;
+          if (remote && remote.patients) {
+            // Sólo actualizar si es realmente diferente (timestamp/lastWrite)
+            const localStr = JSON.stringify(State.data);
+            const remoteStr = JSON.stringify({ patients: remote.patients, lastWrite: remote.lastWrite });
+            if (localStr !== remoteStr) {
+              State.data = { patients: remote.patients, lastWrite: remote.lastWrite };
+              try { localStorage.setItem(STORAGE_KEY, JSON.stringify(State.data)); } catch(e){}
+              if (App.render) App.render();
+              // Si hay un modal abierto, refrescarlo
+              const open = document.querySelector('.modal-backdrop');
+              if (open) {
+                const idMatch = open.outerHTML.match(/openPaciente\('([^']+)'\)/);
+                // El modal se mantiene si el paciente sigue existiendo
+                if (App._currentModalId && State.data.patients.some(p=>p.id===App._currentModalId)) {
+                  App.renderModal(App._currentModalId);
+                } else if (App._currentModalId) {
+                  App.closeModal();
+                }
+              }
+            }
+          } else if (!snap.exists()) {
+            // Documento no existe; subir lo local
+            this.pushNow();
+          }
+        },
+        (err) => {
+          console.error('Firestore error:', err);
+          this.setStatus('error', 'Error: ' + (err.code||err.message||''));
+          alert('Error de Firebase: ' + (err.message || err.code) +
+            '\n\nVerifica las reglas de Firestore y la configuración.');
+        }
+      );
+
+      window.addEventListener('online', () => { if (this.status==='offline') this.setStatus('online'); });
+      window.addEventListener('offline', () => this.setStatus('offline'));
+      return true;
+    } catch(e) {
+      console.error(e);
+      this.setStatus('error', e.message);
+      alert('No se pudo conectar a Firebase: ' + e.message);
+      return false;
+    }
+  },
+
+  scheduleSave() {
+    if (!this.db) return;
+    if (this.saveTimeout) clearTimeout(this.saveTimeout);
+    this.saveTimeout = setTimeout(() => this.pushNow(), 400);
+  },
+
+  async pushNow() {
+    if (!this.db) return;
+    try {
+      const ref = window.FB.doc(this.db, FB_DOC_PATH);
+      this.ignoreNextRemote = true;
+      const payload = {
+        patients: State.data.patients || [],
+        lastWrite: Date.now()
+      };
+      State.data.lastWrite = payload.lastWrite;
+      await window.FB.setDoc(ref, payload);
+    } catch(e) {
+      console.error('Error guardando en la nube:', e);
+      this.ignoreNextRemote = false;
+      if (!navigator.onLine) this.setStatus('offline');
+      else this.setStatus('error', 'Error al guardar');
+    }
+  },
+
+  disconnect() {
+    if (this.unsubscribe) { try { this.unsubscribe(); } catch(e){} this.unsubscribe = null; }
+    this.app = null; this.db = null;
+    this.setStatus('local');
+  }
+};
+
+/* ---------- Estado y persistencia ---------- */
+const State = {
+  data: { patients: [] },
+  currentTab: 'lista',
+  search: '',
+  load() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) this.data = JSON.parse(raw);
+    } catch(e) { console.warn('No se pudo cargar datos', e); }
+    if (!this.data.patients) this.data.patients = [];
+  },
+  save() {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(this.data)); }
+    catch(e) { alert('Error al guardar localmente: ' + e.message); }
+    Sync.scheduleSave();
+  }
+};
+
+/* ---------- Lógica clínica ---------- */
+function tieneAntecedentes(p) {
+  return !!(p.antecedentesPatologicos && p.antecedentesPatologicos.trim().length > 0);
+}
+
+function estudiosBasicos(p) {
+  return ['rxTorax','hemograma','tiemposCoagulacion','quimicaSanguinea']
+    .every(k => p.estudios[k] && p.estudios[k].realizado);
+}
+
+function estudiosCompletos(p) {
+  return estudiosBasicos(p)
+    && p.estudios.ekg.realizado
+    && p.estudios.evaluacionPreop.realizado;
+}
+
+function tieneContraindicacion(p) {
+  const c = p.contraindicaciones || {};
+  return c.malEstadoGeneral || c.malEstadoTejidos || (c.otra && c.otra.trim().length > 0);
+}
+
+/**
+ * Devuelve { listo: bool, motivo: string, faltantes: [strings] }
+ */
+function evaluarAptoCirugia(p) {
+  const edad = parseInt(p.edad, 10);
+  const faltantes = [];
+  if (!edad || isNaN(edad)) {
+    return { listo:false, motivo:'Falta registrar edad', faltantes:['Edad'] };
+  }
+
+  if (tieneContraindicacion(p)) {
+    const motivos = [];
+    if (p.contraindicaciones.malEstadoGeneral) motivos.push('mal estado general');
+    if (p.contraindicaciones.malEstadoTejidos) motivos.push('mal estado de tejidos blandos');
+    if (p.contraindicaciones.otra) motivos.push(p.contraindicaciones.otra);
+    return { listo:false, motivo:'Contraindicación: ' + motivos.join(', '), faltantes:[] };
+  }
+
+  const requiereCompletos = (edad >= 50) || tieneAntecedentes(p);
+
+  if (!p.estudios.rxTorax.realizado) faltantes.push('Rx tórax');
+  if (!p.estudios.hemograma.realizado) faltantes.push('Hemograma');
+  if (!p.estudios.tiemposCoagulacion.realizado) faltantes.push('Tiempos coagulación');
+  if (!p.estudios.quimicaSanguinea.realizado) faltantes.push('Química sanguínea');
+  if (requiereCompletos) {
+    if (!p.estudios.ekg.realizado) faltantes.push('EKG');
+    if (!p.estudios.evaluacionPreop.realizado) faltantes.push('Eval. preop. M.I./M.F./Geriatría');
+  }
+
+  if (faltantes.length === 0) {
+    return { listo:true, motivo: requiereCompletos ? 'Preop completo' : 'Estudios básicos completos', faltantes:[] };
+  }
+  return { listo:false, motivo:'Faltan estudios', faltantes };
+}
+
+/**
+ * Detecta si el paciente tiene diagnóstico de infección.
+ */
+function tieneInfeccion(p) {
+  if (!p.diagnosticos) return false;
+  const re = /infecc|infect|osteomielitis|absceso|celulitis|sepsis|piomi/i;
+  return p.diagnosticos.some(d => re.test(d));
+}
+
+/**
+ * Calcula alertas activas para el paciente.
+ */
+function calcularAlertasPaciente(p) {
+  const alertas = [];
+  const dias = daysBetween(p.fechaIngreso);
+
+  // 1. Recordatorio 7 días para infección
+  if (tieneInfeccion(p) && dias >= 7) {
+    const ultimoControl = (p.controlInfeccion || []).slice().sort((a,b)=>b.fecha.localeCompare(a.fecha))[0];
+    const diasUltimo = ultimoControl ? daysBetween(ultimoControl.fecha) : dias;
+    if (!ultimoControl || diasUltimo >= 7) {
+      alertas.push({
+        tipo:'red',
+        texto:`Diagnóstico de infección con ${dias} días de hospitalización. Repetir Rx y exámenes de control de infección (último: ${ultimoControl ? fmtDate(ultimoControl.fecha) : 'ninguno'}).`
+      });
+    }
+  }
+
+  // 2. Interconsultas pendientes >2 días
+  (p.interconsultas || []).forEach(ic => {
+    if (!ic.respondida) {
+      const d = daysBetween(ic.fechaSolicitud);
+      if (d >= 2) {
+        alertas.push({
+          tipo:'yellow',
+          texto:`Interconsulta a ${ic.servicio} solicitada hace ${d} día(s) sin respuesta.`
+        });
+      }
+    }
+  });
+
+  // 3. Listo para cirugía
+  const apto = evaluarAptoCirugia(p);
+  if (apto.listo) {
+    alertas.push({
+      tipo:'green',
+      texto:`Paciente listo para cirugía (${apto.motivo}).`
+    });
+  }
+
+  // 4. Hospitalización prolongada
+  if (dias >= 14) {
+    alertas.push({
+      tipo:'yellow',
+      texto:`Hospitalización prolongada: ${dias} días.`
+    });
+  }
+
+  return alertas;
+}
+
+/* ---------- Historial ---------- */
+function logCambio(p, accion, detalle='') {
+  if (!p.historial) p.historial = [];
+  p.historial.push({
+    fecha: new Date().toISOString(),
+    accion,
+    detalle
+  });
+  // mantener solo últimos 200
+  if (p.historial.length > 200) p.historial = p.historial.slice(-200);
+}
+
+/* =========================================================
+   APP - Render & lógica de UI
+   ========================================================= */
+const App = {
+  _currentModalId: null,
+
+  async init() {
+    State.load();
+    this.switchTab('lista');
+    this.refreshAlertCount();
+    // Intentar conectar a la nube si hay configuración
+    if (Sync.getConfig()) {
+      await Sync.connect();
+    } else {
+      // Mostrar pantalla de bienvenida con la opción de configurar
+      Sync.setStatus('local');
+      // Si es la primera vez (sin pacientes), invitar a configurar
+      if ((State.data.patients||[]).length === 0) {
+        this.openSetup(true);
+      }
+    }
+  },
+
+  /* ---------- Pantalla de configuración Firebase ---------- */
+  openSetup(firstTime=false) {
+    const cfg = Sync.getConfig() || {};
+    const status = Sync.status;
+    const html = `
+      <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
+        <div class="modal">
+          <div class="modal-head">
+            <div>
+              <div style="font-weight:600">${firstTime?'Bienvenido':'Configuración de sincronización'}</div>
+              <div style="font-size:.8rem;opacity:.9">Acceso multidispositivo en tiempo real</div>
+            </div>
+            <button class="close-x" onclick="App.closeModal()">✕</button>
+          </div>
+          <div class="modal-body">
+            <div class="alert-box ${status==='online'?'green':(status==='local'?'yellow':'blue')}">
+              Estado actual: <strong>${
+                status==='online'?'✓ Sincronizado con la nube':
+                status==='local'?'⚠ Sólo guarda en este dispositivo':
+                status==='offline'?'Sin conexión - cambios se sincronizarán al reconectar':
+                'Conectando…'
+              }</strong>
+            </div>
+
+            <div class="setup-step">
+              <h3>1. Crea un proyecto Firebase (gratis, una sola vez)</h3>
+              <ol style="padding-left:20px;line-height:1.6">
+                <li>Entra a <a href="https://console.firebase.google.com/" target="_blank">console.firebase.google.com</a> con tu Gmail.</li>
+                <li>Click en <strong>"Agregar proyecto"</strong>. Ponle un nombre (ej. "ortopedia"). Acepta los pasos por defecto.</li>
+                <li>Una vez creado, en el menú lateral entra a <strong>"Build → Firestore Database"</strong>.</li>
+                <li>Click en <strong>"Crear base de datos"</strong>. Elige <strong>"Modo de prueba"</strong> y la ubicación más cercana.</li>
+              </ol>
+            </div>
+
+            <div class="setup-step">
+              <h3>2. Configura las reglas de seguridad</h3>
+              <p>En Firestore, pestaña <strong>"Reglas"</strong>, pega estas reglas y publica:</p>
+              <div class="code-block">rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /apps/ortopedia {
+      allow read, write: if true;
+    }
+  }
+}</div>
+              <button class="copy-btn" onclick="App.copyText(\`rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /apps/ortopedia {
+      allow read, write: if true;
+    }
+  }
+}\`)">Copiar reglas</button>
+              <p class="muted" style="margin-top:8px"><strong>Importante:</strong> esto deja el documento abierto a quien tenga la URL. Mantén privada la URL de la app y, si necesitas más seguridad, podemos agregar un código de acceso después.</p>
+            </div>
+
+            <div class="setup-step">
+              <h3>3. Registra una aplicación web</h3>
+              <p>Ve al ícono de <strong>configuración</strong> (engrane) → <strong>"Configuración del proyecto"</strong>. Baja hasta <strong>"Tus apps"</strong> y click en el ícono <strong>&lt;/&gt;</strong> (web).</p>
+              <p>Dale un nombre (ej. "Ortopedia Web") y registra. Verás un código con un objeto <code>firebaseConfig = { ... }</code>. <strong>Cópialo completo</strong>.</p>
+            </div>
+
+            <div class="setup-step">
+              <h3>4. Pega tu configuración aquí</h3>
+              <p>Pega el objeto completo (puedes incluir <code>const firebaseConfig =</code> y los <code>{ }</code>):</p>
+              <textarea id="fbConfigInput" rows="10" placeholder='const firebaseConfig = {
+  apiKey: "AIzaSy...",
+  authDomain: "tu-proyecto.firebaseapp.com",
+  projectId: "tu-proyecto",
+  storageBucket: "tu-proyecto.appspot.com",
+  messagingSenderId: "123456789",
+  appId: "1:123:web:abc..."
+};'>${cfg.apiKey?JSON.stringify(cfg, null, 2):''}</textarea>
+              <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+                <button class="btn success" onclick="App.saveFbConfig()">Conectar a la nube</button>
+                ${cfg.apiKey?`<button class="btn ghost" onclick="App.clearFbConfig()">Desconectar / borrar config</button>`:''}
+              </div>
+            </div>
+
+            <div class="setup-step">
+              <h3>5. Comparte la URL con tu equipo</h3>
+              <p>Una vez conectado, sube este archivo a un hosting gratuito (Netlify drop, GitHub Pages, Firebase Hosting). Cualquier persona que abra la URL verá los mismos pacientes y podrá modificarlos en tiempo real.</p>
+              <p class="muted">La configuración de Firebase queda guardada en este dispositivo. En cada dispositivo nuevo (o navegador en incógnito) hay que configurar una sola vez con los mismos datos.</p>
+            </div>
+
+            <div class="setup-step">
+              <h3>Sin configuración Firebase</h3>
+              <p>La app funciona perfectamente sin Firebase, pero los datos sólo quedan en el dispositivo actual. Puedes usar <strong>Exportar/Importar</strong> para mover datos manualmente.</p>
+            </div>
+          </div>
+          <div class="modal-foot">
+            <button class="btn ghost" onclick="App.closeModal()">Cerrar</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.getElementById('modalRoot').innerHTML = html;
+  },
+
+  copyText(t) {
+    navigator.clipboard.writeText(t).then(()=> {
+      alert('Copiado al portapapeles.');
+    }).catch(()=>{
+      const ta = document.createElement('textarea');
+      ta.value = t; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+      alert('Copiado.');
+    });
+  },
+
+  saveFbConfig() {
+    let txt = (document.getElementById('fbConfigInput').value||'').trim();
+    if (!txt) { alert('Pega la configuración primero.'); return; }
+
+    // Limpiar etiquetas <script>, comentarios HTML y comentarios JS por si pegaron el bloque completo
+    txt = txt
+      .replace(/<script[^>]*>/gi, '')
+      .replace(/<\/script>/gi, '')
+      .replace(/\/\/[^\n]*/g, '')        // // comentarios
+      .replace(/\/\*[\s\S]*?\*\//g, ''); // /* comentarios */
+
+    let cfg = null;
+    let lastErr = '';
+
+    // Intento 1: JSON puro
+    try { cfg = JSON.parse(txt); } catch(e) { lastErr = e.message; }
+
+    // Intento 2: parser manual con regex (sin eval, compatible con CSP estricta)
+    if (!cfg) {
+      const m = txt.match(/\{[\s\S]*\}/);
+      if (m) {
+        cfg = {};
+        // Extraer pares clave: "valor" o clave: 'valor'
+        const re = /(\w+)\s*:\s*(["'])((?:\\.|(?!\2).)*)\2/g;
+        let match;
+        while ((match = re.exec(m[0])) !== null) {
+          cfg[match[1]] = match[3];
+        }
+        if (Object.keys(cfg).length === 0) {
+          cfg = null;
+          lastErr = 'No se encontraron pares "clave: \"valor\"" dentro de las llaves.';
+        }
+      } else {
+        lastErr = 'No se encontraron las llaves { } en el texto pegado.';
+      }
+    }
+
+    if (!cfg || typeof cfg !== 'object' || !cfg.apiKey || !cfg.projectId) {
+      const faltan = [];
+      if (cfg && !cfg.apiKey) faltan.push('apiKey');
+      if (cfg && !cfg.projectId) faltan.push('projectId');
+      alert('No se pudo leer la configuración.\n\n' +
+        (faltan.length
+          ? 'Falta(n): ' + faltan.join(', ')
+          : 'Asegúrate de pegar el objeto firebaseConfig completo, desde la llave { hasta }, incluyendo apiKey y projectId.') +
+        (lastErr ? '\n\nDetalle técnico: ' + lastErr : '') +
+        '\n\nEjemplo válido:\n{\n  apiKey: "AIza...",\n  authDomain: "tu-proyecto.firebaseapp.com",\n  projectId: "tu-proyecto",\n  ...\n}');
+      return;
+    }
+
+    // Limpiar a sólo los campos que necesita Firebase (quita ruido)
+    const keep = ['apiKey','authDomain','projectId','storageBucket','messagingSenderId','appId','databaseURL','measurementId'];
+    const clean = {};
+    keep.forEach(k => { if (cfg[k] != null) clean[k] = cfg[k]; });
+
+    Sync.setConfig(clean);
+    this.closeModal();
+    Sync.disconnect();
+    Sync.connect().then(ok => {
+      if (ok) alert('¡Conectado a la nube! Los cambios se sincronizarán automáticamente entre dispositivos.');
+    });
+  },
+
+  clearFbConfig() {
+    if (!confirm('¿Desconectar de la nube? Los datos en la nube no se borran, sólo dejarás de sincronizar en este dispositivo.')) return;
+    Sync.disconnect();
+    Sync.setConfig(null);
+    this.closeModal();
+  },
+
+  refreshAlertCount() {
+    let total = 0;
+    State.data.patients.filter(p=>!p.fechaEgreso).forEach(p => {
+      total += calcularAlertasPaciente(p).filter(a => a.tipo==='red' || a.tipo==='yellow').length;
+    });
+    const badge = document.getElementById('alertCount');
+    if (total > 0) {
+      badge.style.display = 'inline-block';
+      badge.textContent = total;
+    } else {
+      badge.style.display = 'none';
+    }
+  },
+
+  switchTab(tab) {
+    State.currentTab = tab;
+    document.querySelectorAll('#tabs button').forEach(b => {
+      b.classList.toggle('active', b.dataset.tab === tab);
+    });
+    this.render();
+  },
+
+  render() {
+    const view = document.getElementById('view');
+    const t = State.currentTab;
+    if (t === 'lista') view.innerHTML = this.renderLista(false);
+    else if (t === 'cirugia') view.innerHTML = this.renderCirugia();
+    else if (t === 'alertas') view.innerHTML = this.renderAlertas();
+    else if (t === 'todos') view.innerHTML = this.renderLista(true);
+    this.refreshAlertCount();
+  },
+
+  /* ---------- Pase de visita / lista por cama ---------- */
+  renderLista(incluirEgresados) {
+    const pacientes = State.data.patients
+      .filter(p => incluirEgresados || !p.fechaEgreso)
+      .filter(p => this.matchesSearch(p))
+      .sort((a,b) => {
+        const ca = (a.cama||'').toString();
+        const cb = (b.cama||'').toString();
+        const na = parseInt(ca,10), nb = parseInt(cb,10);
+        if (!isNaN(na) && !isNaN(nb) && na !== nb) return na - nb;
+        return ca.localeCompare(cb, 'es');
+      });
+
+    const titulo = incluirEgresados ? 'Todos los pacientes' : 'Pase de visita (por cama)';
+    const subt = `${pacientes.length} paciente(s)${incluirEgresados?' incluyendo egresados':' activos'}`;
+
+    let html = `
+      <div class="print-only">
+        <div class="print-title">Servicio de Ortopedia — ${titulo}</div>
+        <div class="print-sub">${new Date().toLocaleString('es')} · ${pacientes.length} pacientes</div>
+      </div>
+
+      <div class="toolbar no-print">
+        <input type="search" placeholder="Buscar por nombre, cédula, cama, dx..." value="${escapeHtml(State.search)}"
+               oninput="App.setSearch(this.value)">
+        <button class="btn ghost small" onclick="window.print()">🖨 Imprimir</button>
+      </div>
+    `;
+
+    if (pacientes.length === 0) {
+      html += `<div class="empty">
+        <div class="ico">🛏️</div>
+        <div>No hay pacientes ${incluirEgresados?'':'activos'}.</div>
+        <div style="margin-top:10px"><button class="btn" onclick="App.openNew()">+ Agregar primer paciente</button></div>
+      </div>`;
+      return html;
+    }
+
+    // Versión compacta para impresión
+    html += `
+      <div class="card print-only">
+        <table>
+          <thead><tr>
+            <th>Cama</th><th>Nombre</th><th>Cédula</th><th>Edad</th>
+            <th>Días</th><th>Diagnóstico</th><th>¿Operable?</th><th>Cirujano</th>
+          </tr></thead>
+          <tbody>
+            ${pacientes.map(p => {
+              const apto = evaluarAptoCirugia(p);
+              const dias = daysBetween(p.fechaIngreso);
+              return `<tr>
+                <td><strong>${escapeHtml(p.cama||'—')}</strong></td>
+                <td>${escapeHtml(p.nombre||'')}</td>
+                <td>${escapeHtml(p.cedula||'')}</td>
+                <td>${escapeHtml(p.edad||'')}</td>
+                <td>${dias}</td>
+                <td>${escapeHtml((p.diagnosticos||[]).join('; ') || '—')}</td>
+                <td>${apto.listo ? 'SÍ' : 'No · '+apto.faltantes.slice(0,3).join(', ')+(apto.faltantes.length>3?'...':'')}</td>
+                <td>${escapeHtml(p.cirujano||'—')}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    // Versión interactiva
+    html += `<div class="no-print">${pacientes.map(p => this.renderPatientCard(p)).join('')}</div>`;
+    return html;
+  },
+
+  renderPatientCard(p) {
+    const dias = daysBetween(p.fechaIngreso);
+    const apto = evaluarAptoCirugia(p);
+    const alertas = calcularAlertasPaciente(p);
+    const tieneRoja = alertas.some(a=>a.tipo==='red');
+    const tieneAmarilla = alertas.some(a=>a.tipo==='yellow');
+    let cls = 'patient-card';
+    if (apto.listo && !tieneRoja) cls += ' ready';
+    if (tieneRoja) cls += ' alert';
+    else if (tieneAmarilla) cls += ' warn';
+    if (p.fechaEgreso) cls += ' muted';
+
+    const dxList = (p.diagnosticos || []).join(', ');
+    const tagsHtml = [
+      apto.listo ? '<span class="tag green">Listo cirugía</span>' :
+        '<span class="tag red">Pendiente</span>',
+      tieneInfeccion(p) ? '<span class="tag yellow">Infección</span>' : '',
+      p.fechaEgreso ? '<span class="tag gray">Egresado</span>' : ''
+    ].filter(Boolean).join(' ');
+
+    return `
+      <div class="${cls}" onclick="App.openPaciente('${p.id}')">
+        <div class="pc-row">
+          <div class="pc-bed">${escapeHtml(p.cama||'?')}</div>
+          <div class="pc-info">
+            <div class="pc-name">${escapeHtml(p.nombre || '(sin nombre)')}</div>
+            <div class="pc-meta">
+              ${escapeHtml(p.cedula||'—')} · ${escapeHtml(p.edad||'?')} años · ${dias} día(s) hosp.
+              ${p.cirujano? ' · Cir: '+escapeHtml(p.cirujano):''}
+            </div>
+            <div class="pc-meta" style="margin-top:4px">
+              <strong>Dx:</strong> ${escapeHtml(dxList || '—')}
+            </div>
+            <div class="pc-tags">${tagsHtml}</div>
+            ${alertas.filter(a=>a.tipo==='red').slice(0,1).map(a=>`
+              <div class="alert-box red" style="margin-top:6px;font-size:.78rem;padding:6px 8px">⚠ ${escapeHtml(a.texto)}</div>
+            `).join('')}
+          </div>
+        </div>
+      </div>
+    `;
+  },
+
+  setSearch(v) {
+    State.search = v;
+    this.render();
+  },
+
+  matchesSearch(p) {
+    const q = (State.search||'').toLowerCase().trim();
+    if (!q) return true;
+    const blob = [
+      p.nombre, p.cedula, p.cama, p.cirujano,
+      ...(p.diagnosticos||[])
+    ].join(' ').toLowerCase();
+    return blob.includes(q);
+  },
+
+  /* ---------- Listos para cirugía ---------- */
+  renderCirugia() {
+    const pacientes = State.data.patients
+      .filter(p => !p.fechaEgreso)
+      .filter(p => evaluarAptoCirugia(p).listo)
+      .sort((a,b)=> {
+        const ca = (a.cama||'').toString(), cb = (b.cama||'').toString();
+        const na = parseInt(ca,10), nb = parseInt(cb,10);
+        if (!isNaN(na) && !isNaN(nb) && na !== nb) return na - nb;
+        return ca.localeCompare(cb, 'es');
+      });
+
+    let html = `
+      <div class="print-only">
+        <div class="print-title">Pacientes Listos para Cirugía</div>
+        <div class="print-sub">${new Date().toLocaleString('es')} · ${pacientes.length} pacientes</div>
+      </div>
+      <div class="toolbar no-print">
+        <h2 style="margin:0">Listos para cirugía: ${pacientes.length}</h2>
+        <div style="flex:1"></div>
+        <button class="btn ghost small" onclick="window.print()">🖨 Imprimir</button>
+      </div>
+    `;
+
+    if (pacientes.length === 0) {
+      html += `<div class="empty">
+        <div class="ico">⏳</div>
+        <div>Ningún paciente cumple actualmente los criterios para cirugía.</div>
+      </div>`;
+      return html;
+    }
+
+    html += `<div class="card print-only">
+      <table>
+        <thead><tr><th>Cama</th><th>Nombre</th><th>Cédula</th><th>Edad</th><th>Dx</th><th>Cirujano</th><th>Días hosp</th></tr></thead>
+        <tbody>
+          ${pacientes.map(p=>`<tr>
+            <td><strong>${escapeHtml(p.cama||'—')}</strong></td>
+            <td>${escapeHtml(p.nombre||'')}</td>
+            <td>${escapeHtml(p.cedula||'')}</td>
+            <td>${escapeHtml(p.edad||'')}</td>
+            <td>${escapeHtml((p.diagnosticos||[]).join('; '))}</td>
+            <td>${escapeHtml(p.cirujano||'—')}</td>
+            <td>${daysBetween(p.fechaIngreso)}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+
+    html += `<div class="no-print">${pacientes.map(p => this.renderPatientCard(p)).join('')}</div>`;
+    return html;
+  },
+
+  /* ---------- Alertas globales ---------- */
+  renderAlertas() {
+    const items = [];
+    State.data.patients.filter(p=>!p.fechaEgreso).forEach(p => {
+      calcularAlertasPaciente(p).forEach(a => {
+        items.push({ p, a });
+      });
+    });
+
+    // ordenar: rojas primero, luego amarillas, luego verdes
+    const orden = { red:0, yellow:1, blue:2, green:3 };
+    items.sort((x,y) => orden[x.a.tipo] - orden[y.a.tipo]);
+
+    let html = `<h2>Alertas y recordatorios</h2>`;
+    if (items.length === 0) {
+      html += `<div class="empty"><div class="ico">✅</div><div>Sin alertas activas.</div></div>`;
+      return html;
+    }
+
+    items.forEach(({p,a}) => {
+      html += `
+        <div class="alert-box ${a.tipo}" onclick="App.openPaciente('${p.id}')" style="cursor:pointer;margin-bottom:8px">
+          <div class="strong">Cama ${escapeHtml(p.cama||'?')} · ${escapeHtml(p.nombre||'(sin nombre)')}</div>
+          <div>${escapeHtml(a.texto)}</div>
+        </div>
+      `;
+    });
+    return html;
+  },
+
+  /* ===========================================================
+     MODAL DE PACIENTE
+     =========================================================== */
+  _modalSubtab: 'datos',
+
+  openNew() {
+    const p = nuevoPaciente();
+    State.data.patients.push(p);
+    logCambio(p, 'Creación', 'Paciente creado');
+    State.save();
+    this._modalSubtab = 'datos';
+    this.openPaciente(p.id);
+  },
+
+  openPaciente(id) {
+    this._modalSubtab = 'datos';
+    this._currentModalId = id;
+    this.renderModal(id);
+  },
+
+  closeModal() {
+    this._currentModalId = null;
+    document.getElementById('modalRoot').innerHTML = '';
+    this.render();
+  },
+
+  renderModal(id) {
+    const p = State.data.patients.find(x => x.id === id);
+    if (!p) return;
+    const apto = evaluarAptoCirugia(p);
+    const dias = daysBetween(p.fechaIngreso);
+
+    const tabs = [
+      ['datos','Datos básicos'],
+      ['preop','Preoperatorio'],
+      ['meds','Medicamentos'],
+      ['labs','Laboratorios'],
+      ['ic','Interconsultas'],
+      ['inf','Control infección'],
+      ['hist','Historial']
+    ];
+
+    let bodyHtml = '';
+    if (this._modalSubtab === 'datos') bodyHtml = this.tabDatos(p);
+    else if (this._modalSubtab === 'preop') bodyHtml = this.tabPreop(p);
+    else if (this._modalSubtab === 'meds') bodyHtml = this.tabMeds(p);
+    else if (this._modalSubtab === 'labs') bodyHtml = this.tabLabs(p);
+    else if (this._modalSubtab === 'ic') bodyHtml = this.tabIC(p);
+    else if (this._modalSubtab === 'inf') bodyHtml = this.tabInf(p);
+    else if (this._modalSubtab === 'hist') bodyHtml = this.tabHist(p);
+
+    const aptoBadge = apto.listo
+      ? `<span class="pill ready">✓ Listo cirugía</span>`
+      : (tieneContraindicacion(p) ? `<span class="pill notready">No apto</span>` : `<span class="pill pending">Pendiente</span>`);
+
+    const html = `
+      <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
+        <div class="modal">
+          <div class="modal-head">
+            <div>
+              <div style="font-weight:600">${escapeHtml(p.nombre || '(Nuevo paciente)')}</div>
+              <div style="font-size:.8rem;opacity:.9">
+                Cama ${escapeHtml(p.cama||'?')} · ${escapeHtml(p.cedula||'sin cédula')} · ${dias} día(s) ${aptoBadge}
+              </div>
+            </div>
+            <button class="close-x" onclick="App.closeModal()" aria-label="Cerrar">✕</button>
+          </div>
+          <div class="subtabs">
+            ${tabs.map(([k,l])=>`
+              <button class="${this._modalSubtab===k?'active':''}" onclick="App.subtab('${p.id}','${k}')">${l}</button>
+            `).join('')}
+          </div>
+          <div class="modal-body">${bodyHtml}</div>
+          <div class="modal-foot">
+            <button class="btn danger" onclick="App.eliminarPaciente('${p.id}')">Eliminar</button>
+            <div style="flex:1"></div>
+            <button class="btn ghost" onclick="App.closeModal()">Cerrar</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.getElementById('modalRoot').innerHTML = html;
+  },
+
+  subtab(id, k) {
+    this._modalSubtab = k;
+    this.renderModal(id);
+  },
+
+  /* -------- Datos básicos -------- */
+  tabDatos(p) {
+    return `
+      <div class="card">
+        <div class="field-row">
+          <div class="field">
+            <label>Nombre completo *</label>
+            <input value="${escapeHtml(p.nombre)}" oninput="App.actualizar('${p.id}','nombre',this.value)">
+          </div>
+          <div class="field">
+            <label>Cédula / ID</label>
+            <input value="${escapeHtml(p.cedula)}" oninput="App.actualizar('${p.id}','cedula',this.value)">
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Edad</label>
+            <input type="number" min="0" value="${escapeHtml(p.edad)}" oninput="App.actualizar('${p.id}','edad',this.value)">
+          </div>
+          <div class="field">
+            <label>Sexo</label>
+            <select onchange="App.actualizar('${p.id}','sexo',this.value)">
+              <option value="">—</option>
+              <option ${p.sexo==='F'?'selected':''}>F</option>
+              <option ${p.sexo==='M'?'selected':''}>M</option>
+              <option ${p.sexo==='Otro'?'selected':''}>Otro</option>
+            </select>
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>N° de cama</label>
+            <input value="${escapeHtml(p.cama)}" oninput="App.actualizar('${p.id}','cama',this.value)">
+          </div>
+          <div class="field">
+            <label>Cirujano a cargo</label>
+            <input value="${escapeHtml(p.cirujano)}" oninput="App.actualizar('${p.id}','cirujano',this.value)">
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Fecha de ingreso</label>
+            <input type="date" value="${escapeHtml(p.fechaIngreso)}" onchange="App.actualizar('${p.id}','fechaIngreso',this.value)">
+          </div>
+          <div class="field">
+            <label>Fecha de egreso (si aplica)</label>
+            <input type="date" value="${escapeHtml(p.fechaEgreso)}" onchange="App.actualizar('${p.id}','fechaEgreso',this.value)">
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Teléfono</label>
+            <input value="${escapeHtml(p.telefono)}" oninput="App.actualizar('${p.id}','telefono',this.value)">
+          </div>
+          <div class="field">
+            <label>Contacto de emergencia</label>
+            <input value="${escapeHtml(p.contactoEmergencia)}" oninput="App.actualizar('${p.id}','contactoEmergencia',this.value)">
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Diagnósticos</h3>
+        <p class="muted">Agregue uno por línea. Si incluye "infección", "osteomielitis", "absceso", "celulitis" o "sepsis" se activará el recordatorio de control de infección a los 7 días.</p>
+        <textarea rows="4" placeholder="Ej.&#10;Fractura cerrada de tibia derecha&#10;Osteomielitis crónica de fémur izquierdo"
+          onchange="App.actualizarDx('${p.id}', this.value)">${escapeHtml((p.diagnosticos||[]).join('\n'))}</textarea>
+      </div>
+
+      <div class="card">
+        <h3>Antecedentes y alergias</h3>
+        <div class="field">
+          <label>Alergias</label>
+          <textarea rows="2" oninput="App.actualizar('${p.id}','alergias',this.value)">${escapeHtml(p.alergias)}</textarea>
+        </div>
+        <div class="field">
+          <label>Antecedentes personales patológicos</label>
+          <textarea rows="3" placeholder="HTA, DM2, EPOC, ERC, etc." oninput="App.actualizar('${p.id}','antecedentesPatologicos',this.value)">${escapeHtml(p.antecedentesPatologicos)}</textarea>
+        </div>
+        <div class="field">
+          <label>Antecedentes quirúrgicos</label>
+          <textarea rows="2" oninput="App.actualizar('${p.id}','antecedentesQuirurgicos',this.value)">${escapeHtml(p.antecedentesQuirurgicos)}</textarea>
+        </div>
+        <div class="field">
+          <label>Medicamentos previos al ingreso</label>
+          <textarea rows="2" oninput="App.actualizar('${p.id}','medicamentosPrevios',this.value)">${escapeHtml(p.medicamentosPrevios)}</textarea>
+        </div>
+        <div class="field">
+          <label>Otras observaciones relevantes</label>
+          <textarea rows="2" oninput="App.actualizar('${p.id}','observaciones',this.value)">${escapeHtml(p.observaciones)}</textarea>
+        </div>
+      </div>
+    `;
+  },
+
+  /* -------- Preoperatorio -------- */
+  tabPreop(p) {
+    const apto = evaluarAptoCirugia(p);
+    const edad = parseInt(p.edad,10);
+    const requiereCompletos = (edad>=50) || tieneAntecedentes(p);
+
+    const aptoBox = apto.listo
+      ? `<div class="alert-box green"><strong>✓ Paciente listo para cirugía.</strong> ${escapeHtml(apto.motivo)}.</div>`
+      : (tieneContraindicacion(p)
+        ? `<div class="alert-box red"><strong>✗ No apto.</strong> ${escapeHtml(apto.motivo)}</div>`
+        : `<div class="alert-box yellow"><strong>Faltan estudios:</strong> ${apto.faltantes.map(escapeHtml).join(', ')}</div>`);
+
+    const reglaTxt = requiereCompletos
+      ? `Por edad o antecedentes, este paciente requiere <strong>preoperatorio completo</strong> (laboratorios completos, EKG, Rx tórax y evaluación preoperatoria por M.I., M.F., Geriatría o subespecialidad).`
+      : `Paciente sin antecedentes y menor de 50 años: requiere <strong>estudios básicos</strong> (Rx tórax, hemograma, tiempos de coagulación, química sanguínea básica).`;
+
+    const estudio = (key, label, mostrar=true) => {
+      if (!mostrar) return '';
+      const e = p.estudios[key] || {realizado:false,fecha:'',resultado:''};
+      return `
+        <div class="card compact">
+          <div class="row-between">
+            <div class="row-gap">
+              <input type="checkbox" ${e.realizado?'checked':''} onchange="App.toggleEstudio('${p.id}','${key}',this.checked)">
+              <strong>${label}</strong>
+            </div>
+            ${e.realizado?`<span class="tag green">Realizado</span>`:`<span class="tag red">Pendiente</span>`}
+          </div>
+          ${e.realizado?`
+            <div class="field-row" style="margin-top:8px">
+              <div class="field" style="margin-bottom:0">
+                <label>Fecha</label>
+                <input type="date" value="${escapeHtml(e.fecha)}" onchange="App.setEstudioCampo('${p.id}','${key}','fecha',this.value)">
+              </div>
+              <div class="field" style="margin-bottom:0">
+                <label>Resultado / observaciones</label>
+                <input value="${escapeHtml(e.resultado)}" oninput="App.setEstudioCampo('${p.id}','${key}','resultado',this.value)">
+              </div>
+            </div>
+          `:''}
+        </div>
+      `;
+    };
+
+    const evalPre = p.estudios.evaluacionPreop;
+    const evalBlock = `
+      <div class="card compact">
+        <div class="row-between">
+          <div class="row-gap">
+            <input type="checkbox" ${evalPre.realizado?'checked':''} onchange="App.toggleEstudio('${p.id}','evaluacionPreop',this.checked)">
+            <strong>Evaluación preoperatoria</strong>
+          </div>
+          ${evalPre.realizado?`<span class="tag green">Realizada</span>`:`<span class="tag red">Pendiente</span>`}
+        </div>
+        ${evalPre.realizado?`
+          <div class="field-row" style="margin-top:8px">
+            <div class="field" style="margin-bottom:0">
+              <label>Fecha</label>
+              <input type="date" value="${escapeHtml(evalPre.fecha)}" onchange="App.setEstudioCampo('${p.id}','evaluacionPreop','fecha',this.value)">
+            </div>
+            <div class="field" style="margin-bottom:0">
+              <label>Especialidad</label>
+              <select onchange="App.setEstudioCampo('${p.id}','evaluacionPreop','especialidad',this.value)">
+                <option value="">—</option>
+                ${SPECIALIDADES_PREOP.map(s=>`<option ${evalPre.especialidad===s?'selected':''}>${s}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+          <div class="field" style="margin-top:8px;margin-bottom:0">
+            <label>Conclusión / autorización</label>
+            <input value="${escapeHtml(evalPre.resultado)}" oninput="App.setEstudioCampo('${p.id}','evaluacionPreop','resultado',this.value)">
+          </div>
+        `:''}
+      </div>
+    `;
+
+    return `
+      ${aptoBox}
+      <div class="alert-box blue">${reglaTxt}</div>
+
+      <div class="card">
+        <h3>Estudios básicos</h3>
+        ${estudio('rxTorax','Rx de tórax')}
+        ${estudio('hemograma','Hemograma completo')}
+        ${estudio('tiemposCoagulacion','Tiempos de coagulación (TP/TPT/INR)')}
+        ${estudio('quimicaSanguinea','Química sanguínea básica')}
+      </div>
+
+      <div class="card">
+        <h3>Estudios adicionales (≥50 años o con antecedentes)</h3>
+        ${requiereCompletos?'':'<div class="muted">No requeridos para este paciente, pero pueden registrarse si se realizan.</div>'}
+        ${estudio('ekg','Electrocardiograma (EKG)')}
+        ${evalBlock}
+      </div>
+
+      <div class="card">
+        <h3>Contraindicaciones / razones para no operar</h3>
+        <div class="checkbox-row">
+          <input type="checkbox" id="cgi-${p.id}" ${p.contraindicaciones.malEstadoGeneral?'checked':''}
+            onchange="App.setContra('${p.id}','malEstadoGeneral',this.checked)">
+          <label for="cgi-${p.id}">Mal estado general</label>
+        </div>
+        <div class="checkbox-row">
+          <input type="checkbox" id="cti-${p.id}" ${p.contraindicaciones.malEstadoTejidos?'checked':''}
+            onchange="App.setContra('${p.id}','malEstadoTejidos',this.checked)">
+          <label for="cti-${p.id}">Mal estado de tejidos blandos</label>
+        </div>
+        <div class="field" style="margin-top:8px">
+          <label>Otra contraindicación</label>
+          <input value="${escapeHtml(p.contraindicaciones.otra||'')}" oninput="App.setContra('${p.id}','otra',this.value)">
+        </div>
+      </div>
+    `;
+  },
+
+  /* -------- Medicamentos -------- */
+  tabMeds(p) {
+    const meds = (p.medicamentos||[]).slice().sort((a,b) => (b.activo?1:0) - (a.activo?1:0));
+    return `
+      <div class="card">
+        <div class="row-between">
+          <h3 style="margin:0">Medicamentos en curso</h3>
+          <button class="btn small" onclick="App.addMed('${p.id}')">+ Agregar</button>
+        </div>
+        ${meds.length===0?`<div class="muted" style="margin-top:8px">Sin medicamentos registrados.</div>`:''}
+        ${meds.map(m => {
+          const dias = daysBetween(m.inicio, m.fin || null);
+          return `
+            <div class="card compact" style="margin-top:10px;border-left:4px solid ${m.activo?'#059669':'#cbd5e1'}">
+              <div class="field-row">
+                <div class="field" style="margin-bottom:0">
+                  <label>Medicamento</label>
+                  <input value="${escapeHtml(m.nombre)}" oninput="App.setMed('${p.id}','${m.id}','nombre',this.value)">
+                </div>
+                <div class="field" style="margin-bottom:0">
+                  <label>Dosis</label>
+                  <input value="${escapeHtml(m.dosis)}" oninput="App.setMed('${p.id}','${m.id}','dosis',this.value)">
+                </div>
+              </div>
+              <div class="field-row" style="margin-top:8px">
+                <div class="field" style="margin-bottom:0">
+                  <label>Vía</label>
+                  <input value="${escapeHtml(m.via)}" oninput="App.setMed('${p.id}','${m.id}','via',this.value)" placeholder="VO / IV / IM / SC">
+                </div>
+                <div class="field" style="margin-bottom:0">
+                  <label>Frecuencia</label>
+                  <input value="${escapeHtml(m.frecuencia)}" oninput="App.setMed('${p.id}','${m.id}','frecuencia',this.value)" placeholder="c/8h">
+                </div>
+              </div>
+              <div class="field-row" style="margin-top:8px">
+                <div class="field" style="margin-bottom:0">
+                  <label>Inicio</label>
+                  <input type="date" value="${escapeHtml(m.inicio)}" onchange="App.setMed('${p.id}','${m.id}','inicio',this.value)">
+                </div>
+                <div class="field" style="margin-bottom:0">
+                  <label>Fin (vacío = activo)</label>
+                  <input type="date" value="${escapeHtml(m.fin||'')}" onchange="App.setMedFin('${p.id}','${m.id}',this.value)">
+                </div>
+              </div>
+              <div class="row-between" style="margin-top:8px">
+                <div class="muted">${m.activo?`Activo · ${dias} día(s)`:`Suspendido · ${dias} día(s) total`}</div>
+                <button class="btn ghost small" onclick="App.delMed('${p.id}','${m.id}')">Eliminar</button>
+              </div>
+              <div class="field" style="margin-top:8px;margin-bottom:0">
+                <label>Notas</label>
+                <input value="${escapeHtml(m.nota||'')}" oninput="App.setMed('${p.id}','${m.id}','nota',this.value)">
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `;
+  },
+
+  /* -------- Laboratorios -------- */
+  tabLabs(p) {
+    const labs = (p.laboratorios||[]).slice().sort((a,b)=>(a.fecha||'').localeCompare(b.fecha||''));
+    // Recolectar todas las claves de valores presentes
+    const keysSet = new Set();
+    labs.forEach(l => Object.keys(l.valores||{}).forEach(k => keysSet.add(k)));
+    const claves = Array.from(keysSet);
+    const COMUNES = ['Hb','Hto','Leu','Neut','Plt','Cr','BUN','Glu','Na','K','Ca','PCR','VES','TP','TPT','INR','AST','ALT'];
+    COMUNES.forEach(k => { if(!keysSet.has(k)) claves.push(k); });
+
+    return `
+      <div class="card">
+        <div class="row-between">
+          <h3 style="margin:0">Laboratorios en el tiempo</h3>
+          <button class="btn small" onclick="App.addLab('${p.id}')">+ Nueva fecha</button>
+        </div>
+        <p class="muted" style="margin-top:6px">Registre los valores manualmente. Cada columna es una toma.</p>
+        ${labs.length===0?`<div class="muted" style="margin-top:8px">Sin laboratorios registrados.</div>`:`
+          <div class="table-wrap" style="margin-top:10px">
+            <table class="lab-table">
+              <thead>
+                <tr>
+                  <th>Examen</th>
+                  ${labs.map(l=>`<th>${fmtDate(l.fecha)} <button class="btn ghost small" style="margin-left:4px" onclick="App.delLab('${p.id}','${l.id}')">×</button></th>`).join('')}
+                </tr>
+              </thead>
+              <tbody>
+                ${claves.map(k => `
+                  <tr>
+                    <td><strong>${escapeHtml(k)}</strong></td>
+                    ${labs.map(l => `
+                      <td><input value="${escapeHtml((l.valores||{})[k]||'')}"
+                          oninput="App.setLabVal('${p.id}','${l.id}','${escapeHtml(k)}',this.value)"></td>
+                    `).join('')}
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+          <div class="muted" style="margin-top:8px">Para añadir un examen no listado, edite la fecha y agregue el nombre nuevo abajo.</div>
+          <div class="field-row" style="margin-top:6px">
+            <div class="field" style="margin-bottom:0">
+              <input id="newLabKey-${p.id}" placeholder="Nombre del examen (ej. Albúmina)">
+            </div>
+            <div class="field" style="margin-bottom:0">
+              <button class="btn small" onclick="App.addLabKey('${p.id}')">Agregar examen</button>
+            </div>
+          </div>
+        `}
+      </div>
+    `;
+  },
+
+  /* -------- Interconsultas -------- */
+  tabIC(p) {
+    const ics = (p.interconsultas||[]).slice().sort((a,b)=>(b.fechaSolicitud||'').localeCompare(a.fechaSolicitud||''));
+    return `
+      <div class="card">
+        <div class="row-between">
+          <h3 style="margin:0">Interconsultas</h3>
+          <button class="btn small" onclick="App.addIC('${p.id}')">+ Nueva</button>
+        </div>
+        ${ics.length===0?`<div class="muted" style="margin-top:8px">Sin interconsultas.</div>`:''}
+        ${ics.map(ic => {
+          const dias = daysBetween(ic.fechaSolicitud, ic.respondida ? (ic.fechaRespuesta||todayISO()) : null);
+          return `
+            <div class="card compact" style="margin-top:10px;border-left:4px solid ${ic.respondida?'#059669':'#f59e0b'}">
+              <div class="field-row">
+                <div class="field" style="margin-bottom:0">
+                  <label>Servicio</label>
+                  <select onchange="App.setIC('${p.id}','${ic.id}','servicio',this.value)">
+                    ${SERVICIOS_INTERCONSULTA.map(s=>`<option ${ic.servicio===s?'selected':''}>${s}</option>`).join('')}
+                  </select>
+                </div>
+                <div class="field" style="margin-bottom:0">
+                  <label>Fecha solicitud</label>
+                  <input type="date" value="${escapeHtml(ic.fechaSolicitud)}" onchange="App.setIC('${p.id}','${ic.id}','fechaSolicitud',this.value)">
+                </div>
+              </div>
+              <div class="field" style="margin-top:8px;margin-bottom:0">
+                <label>Motivo / pregunta clínica</label>
+                <textarea rows="2" oninput="App.setIC('${p.id}','${ic.id}','motivo',this.value)">${escapeHtml(ic.motivo||'')}</textarea>
+              </div>
+              <div class="checkbox-row" style="margin-top:8px">
+                <input type="checkbox" id="ic-r-${ic.id}" ${ic.respondida?'checked':''} onchange="App.toggleICResp('${p.id}','${ic.id}',this.checked)">
+                <label for="ic-r-${ic.id}">Respondida</label>
+                <span class="muted" style="margin-left:8px">${ic.respondida?`✓ ${dias} día(s) en responder`:`Pendiente · ${dias} día(s) sin respuesta`}</span>
+              </div>
+              ${ic.respondida?`
+                <div class="field-row" style="margin-top:8px">
+                  <div class="field" style="margin-bottom:0">
+                    <label>Fecha respuesta</label>
+                    <input type="date" value="${escapeHtml(ic.fechaRespuesta)}" onchange="App.setIC('${p.id}','${ic.id}','fechaRespuesta',this.value)">
+                  </div>
+                </div>
+                <div class="field" style="margin-top:8px;margin-bottom:0">
+                  <label>Respuesta / recomendaciones</label>
+                  <textarea rows="2" oninput="App.setIC('${p.id}','${ic.id}','respuesta',this.value)">${escapeHtml(ic.respuesta||'')}</textarea>
+                </div>
+              `:''}
+              <div style="margin-top:8px;text-align:right">
+                <button class="btn ghost small" onclick="App.delIC('${p.id}','${ic.id}')">Eliminar</button>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `;
+  },
+
+  /* -------- Control infección -------- */
+  tabInf(p) {
+    const dias = daysBetween(p.fechaIngreso);
+    const tieneInf = tieneInfeccion(p);
+    const controles = (p.controlInfeccion||[]).slice().sort((a,b)=>(b.fecha||'').localeCompare(a.fecha||''));
+    const ultimo = controles[0];
+    const diasUltimo = ultimo ? daysBetween(ultimo.fecha) : null;
+    const necesario = tieneInf && dias >= 7 && (!ultimo || diasUltimo >= 7);
+
+    return `
+      ${tieneInf
+        ? (necesario
+          ? `<div class="alert-box red"><strong>⚠ Repetir Rx y exámenes de control de infección.</strong> ${dias} día(s) hospitalizado, último control ${ultimo?fmtDate(ultimo.fecha):'(ninguno)'}.</div>`
+          : `<div class="alert-box green">Control de infección al día.</div>`)
+        : `<div class="alert-box blue">Este paciente no tiene diagnóstico de infección registrado. Si lo desarrolla, agregue el dx en la pestaña <em>Datos básicos</em> para activar los recordatorios.</div>`
+      }
+      <div class="card">
+        <div class="row-between">
+          <h3 style="margin:0">Controles realizados</h3>
+          <button class="btn small" onclick="App.addInf('${p.id}')">+ Registrar control</button>
+        </div>
+        ${controles.length===0?`<div class="muted" style="margin-top:8px">Sin controles registrados.</div>`:''}
+        ${controles.map(c => `
+          <div class="card compact" style="margin-top:10px">
+            <div class="field-row">
+              <div class="field" style="margin-bottom:0">
+                <label>Fecha</label>
+                <input type="date" value="${escapeHtml(c.fecha)}" onchange="App.setInf('${p.id}','${c.fecha}','fecha',this.value)">
+              </div>
+            </div>
+            <div class="checkbox-row" style="margin-top:8px">
+              <input type="checkbox" ${c.rxRepetido?'checked':''} onchange="App.setInf('${p.id}','${c.fecha}','rxRepetido',this.checked)">
+              <label>Rx de control repetido</label>
+            </div>
+            <div class="checkbox-row">
+              <input type="checkbox" ${c.examenesRepetidos?'checked':''} onchange="App.setInf('${p.id}','${c.fecha}','examenesRepetidos',this.checked)">
+              <label>Exámenes de control de infección repetidos (PCR, VES, hemograma, cultivos)</label>
+            </div>
+            <div class="field" style="margin-top:8px;margin-bottom:0">
+              <label>Notas</label>
+              <input value="${escapeHtml(c.nota||'')}" oninput="App.setInf('${p.id}','${c.fecha}','nota',this.value)">
+            </div>
+            <div style="text-align:right;margin-top:8px">
+              <button class="btn ghost small" onclick="App.delInf('${p.id}','${c.fecha}')">Eliminar</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  },
+
+  /* -------- Historial -------- */
+  tabHist(p) {
+    const hist = (p.historial||[]).slice().reverse();
+    return `
+      <div class="card">
+        <h3>Historial de cambios</h3>
+        ${hist.length===0?`<div class="muted">Sin movimientos registrados.</div>`:`
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Fecha y hora</th><th>Acción</th><th>Detalle</th></tr></thead>
+              <tbody>
+                ${hist.map(h => `
+                  <tr>
+                    <td>${new Date(h.fecha).toLocaleString('es')}</td>
+                    <td>${escapeHtml(h.accion)}</td>
+                    <td>${escapeHtml(h.detalle)}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        `}
+      </div>
+    `;
+  },
+
+  /* ===========================================================
+     ACCIONES (mutaciones)
+     =========================================================== */
+  _findP(id) { return State.data.patients.find(x => x.id === id); },
+
+  actualizar(id, campo, valor) {
+    const p = this._findP(id); if (!p) return;
+    if (p[campo] !== valor) {
+      logCambio(p, 'Edición', `${campo}: ${valor}`);
+    }
+    p[campo] = valor;
+    State.save();
+    // No re-render del modal completo para no perder foco; sólo refresca header sutilmente
+    this._refreshHeader(id);
+  },
+
+  _refreshHeader(id) {
+    // Actualiza badge y header de modal sin rerender pesado
+    const p = this._findP(id); if (!p) return;
+    const head = document.querySelector('.modal-head');
+    if (head) {
+      const apto = evaluarAptoCirugia(p);
+      const dias = daysBetween(p.fechaIngreso);
+      const aptoBadge = apto.listo
+        ? `<span class="pill ready">✓ Listo cirugía</span>`
+        : (tieneContraindicacion(p) ? `<span class="pill notready">No apto</span>` : `<span class="pill pending">Pendiente</span>`);
+      head.innerHTML = `
+        <div>
+          <div style="font-weight:600">${escapeHtml(p.nombre || '(Nuevo paciente)')}</div>
+          <div style="font-size:.8rem;opacity:.9">
+            Cama ${escapeHtml(p.cama||'?')} · ${escapeHtml(p.cedula||'sin cédula')} · ${dias} día(s) ${aptoBadge}
+          </div>
+        </div>
+        <button class="close-x" onclick="App.closeModal()" aria-label="Cerrar">✕</button>
+      `;
+    }
+  },
+
+  actualizarDx(id, valor) {
+    const p = this._findP(id); if (!p) return;
+    p.diagnosticos = valor.split('\n').map(s=>s.trim()).filter(Boolean);
+    logCambio(p,'Edición','Diagnósticos actualizados');
+    State.save();
+    this.renderModal(id);
+  },
+
+  toggleEstudio(id, key, val) {
+    const p = this._findP(id); if (!p) return;
+    p.estudios[key].realizado = val;
+    if (val && !p.estudios[key].fecha) p.estudios[key].fecha = todayISO();
+    logCambio(p, 'Estudio', `${key}: ${val?'realizado':'no realizado'}`);
+    State.save();
+    this.renderModal(id);
+  },
+
+  setEstudioCampo(id, key, campo, val) {
+    const p = this._findP(id); if (!p) return;
+    p.estudios[key][campo] = val;
+    State.save();
+  },
+
+  setContra(id, campo, val) {
+    const p = this._findP(id); if (!p) return;
+    p.contraindicaciones[campo] = val;
+    logCambio(p,'Contraindicación',`${campo}: ${val}`);
+    State.save();
+    this.renderModal(id);
+  },
+
+  // Medicamentos
+  addMed(id) {
+    const p = this._findP(id); if (!p) return;
+    p.medicamentos.push({
+      id: 'm_'+uid(), nombre:'', dosis:'', via:'', frecuencia:'',
+      inicio: todayISO(), fin:'', activo: true, nota:''
+    });
+    logCambio(p,'Medicamento','Nuevo registro');
+    State.save();
+    this.renderModal(id);
+  },
+  setMed(id, mid, campo, val) {
+    const p = this._findP(id); if (!p) return;
+    const m = p.medicamentos.find(x=>x.id===mid); if (!m) return;
+    m[campo] = val;
+    State.save();
+  },
+  setMedFin(id, mid, val) {
+    const p = this._findP(id); if (!p) return;
+    const m = p.medicamentos.find(x=>x.id===mid); if (!m) return;
+    m.fin = val;
+    m.activo = !val;
+    logCambio(p,'Medicamento', `${m.nombre}: ${val?'suspendido':'reactivado'}`);
+    State.save();
+    this.renderModal(id);
+  },
+  delMed(id, mid) {
+    const p = this._findP(id); if (!p) return;
+    const m = p.medicamentos.find(x=>x.id===mid);
+    p.medicamentos = p.medicamentos.filter(x => x.id !== mid);
+    logCambio(p,'Medicamento',`Eliminado: ${m?m.nombre:''}`);
+    State.save();
+    this.renderModal(id);
+  },
+
+  // Laboratorios
+  addLab(id) {
+    const p = this._findP(id); if (!p) return;
+    p.laboratorios.push({ id:'l_'+uid(), fecha: todayISO(), valores:{}, nota:'' });
+    logCambio(p,'Laboratorio','Nueva fecha');
+    State.save();
+    this.renderModal(id);
+  },
+  delLab(id, lid) {
+    const p = this._findP(id); if (!p) return;
+    if (!confirm('¿Eliminar esta toma de laboratorios?')) return;
+    p.laboratorios = p.laboratorios.filter(l => l.id !== lid);
+    logCambio(p,'Laboratorio','Toma eliminada');
+    State.save();
+    this.renderModal(id);
+  },
+  setLabVal(id, lid, key, val) {
+    const p = this._findP(id); if (!p) return;
+    const l = p.laboratorios.find(x => x.id === lid); if (!l) return;
+    if (!l.valores) l.valores = {};
+    if (val === '') delete l.valores[key];
+    else l.valores[key] = val;
+    State.save();
+  },
+  addLabKey(id) {
+    const inp = document.getElementById('newLabKey-'+id);
+    if (!inp) return;
+    const k = (inp.value||'').trim();
+    if (!k) return;
+    const p = this._findP(id); if (!p) return;
+    // Asegurar que exista en al menos una toma
+    if (p.laboratorios.length===0) {
+      p.laboratorios.push({ id:'l_'+uid(), fecha: todayISO(), valores:{[k]:''}, nota:'' });
+    } else {
+      p.laboratorios[0].valores = p.laboratorios[0].valores || {};
+      p.laboratorios[0].valores[k] = p.laboratorios[0].valores[k] || '';
+    }
+    logCambio(p,'Laboratorio',`Examen agregado: ${k}`);
+    State.save();
+    this.renderModal(id);
+  },
+
+  // Interconsultas
+  addIC(id) {
+    const p = this._findP(id); if (!p) return;
+    p.interconsultas.push({
+      id: 'ic_'+uid(),
+      fechaSolicitud: todayISO(),
+      servicio: 'Medicina Interna',
+      motivo: '',
+      respondida: false,
+      fechaRespuesta: '',
+      respuesta: ''
+    });
+    logCambio(p,'Interconsulta','Nueva solicitud');
+    State.save();
+    this.renderModal(id);
+  },
+  setIC(id, icid, campo, val) {
+    const p = this._findP(id); if (!p) return;
+    const ic = p.interconsultas.find(x=>x.id===icid); if (!ic) return;
+    ic[campo] = val;
+    State.save();
+  },
+  toggleICResp(id, icid, val) {
+    const p = this._findP(id); if (!p) return;
+    const ic = p.interconsultas.find(x=>x.id===icid); if (!ic) return;
+    ic.respondida = val;
+    if (val && !ic.fechaRespuesta) ic.fechaRespuesta = todayISO();
+    logCambio(p,'Interconsulta', `${ic.servicio}: ${val?'respondida':'reabierta'}`);
+    State.save();
+    this.renderModal(id);
+  },
+  delIC(id, icid) {
+    const p = this._findP(id); if (!p) return;
+    if (!confirm('¿Eliminar esta interconsulta?')) return;
+    p.interconsultas = p.interconsultas.filter(x => x.id !== icid);
+    logCambio(p,'Interconsulta','Eliminada');
+    State.save();
+    this.renderModal(id);
+  },
+
+  // Control infección
+  addInf(id) {
+    const p = this._findP(id); if (!p) return;
+    if (!p.controlInfeccion) p.controlInfeccion = [];
+    if (p.controlInfeccion.some(c => c.fecha === todayISO())) {
+      alert('Ya existe un control con fecha de hoy.');
+      return;
+    }
+    p.controlInfeccion.push({ fecha: todayISO(), rxRepetido:false, examenesRepetidos:false, nota:'' });
+    logCambio(p,'Infección','Control registrado');
+    State.save();
+    this.renderModal(id);
+  },
+  setInf(id, fecha, campo, val) {
+    const p = this._findP(id); if (!p) return;
+    const c = p.controlInfeccion.find(x=>x.fecha===fecha); if (!c) return;
+    c[campo] = val;
+    State.save();
+    if (campo === 'fecha') this.renderModal(id);
+  },
+  delInf(id, fecha) {
+    const p = this._findP(id); if (!p) return;
+    p.controlInfeccion = p.controlInfeccion.filter(x => x.fecha !== fecha);
+    logCambio(p,'Infección','Control eliminado');
+    State.save();
+    this.renderModal(id);
+  },
+
+  // Eliminar paciente
+  eliminarPaciente(id) {
+    if (!confirm('¿Eliminar definitivamente este paciente y todos sus registros?')) return;
+    State.data.patients = State.data.patients.filter(p => p.id !== id);
+    State.save();
+    this.closeModal();
+  },
+
+  /* ---------- Export / Import ---------- */
+  exportData() {
+    const blob = new Blob([JSON.stringify(State.data, null, 2)], { type:'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ortopedia_${todayISO()}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  },
+
+  importData(ev) {
+    const f = ev.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const obj = JSON.parse(e.target.result);
+        if (!obj.patients) throw new Error('Formato no válido');
+        if (!confirm(`Importar ${obj.patients.length} paciente(s)? Se reemplazarán los datos actuales.`)) return;
+        State.data = obj;
+        State.save();
+        this.render();
+      } catch(err) {
+        alert('Error al importar: ' + err.message);
+      }
+    };
+    reader.readAsText(f);
+    ev.target.value = '';
+  }
+};
+
+document.addEventListener('DOMContentLoaded', () => App.init());
+</script>
+</body>
+</html>
