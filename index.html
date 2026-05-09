@@ -498,6 +498,7 @@
   <button data-tab="lista" class="active" onclick="App.switchTab('lista')">Pase de visita</button>
   <button data-tab="cirugia" onclick="App.switchTab('cirugia')">Listos para cirugía</button>
   <button data-tab="programa" onclick="App.switchTab('programa')">Programa Qx</button>
+  <button data-tab="icrecibidas" onclick="App.switchTab('icrecibidas')">IC Recibidas <span class="badge" id="icRecCount" style="display:none">0</span></button>
   <button data-tab="salidas" onclick="App.switchTab('salidas')">Salida</button>
   <button data-tab="reportes" onclick="App.switchTab('reportes')">Reportes</button>
   <button data-tab="alertas" onclick="App.switchTab('alertas')">Alertas <span class="badge" id="alertCount" style="display:none">0</span></button>
@@ -517,7 +518,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.5-fase3-reportes-2026-05-09';
+const APP_VERSION = 'v3.6-ic-recibidas-2026-05-09';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -962,6 +963,40 @@ function getInterconsultasRespondidas(p) {
     .sort((a,b) => (b.fechaRespuesta||'').localeCompare(a.fechaRespuesta||''));
 }
 
+/* ---------- Interconsultas RECIBIDAS por ortopedia (de otros servicios) ---------- */
+function nuevaICEntrante() {
+  return {
+    id: 'icin_' + Date.now().toString(36) + Math.random().toString(36).slice(2,8),
+    fechaSolicitud: new Date().toISOString(),
+    servicioSolicitante: '',
+    paciente: {
+      nombre: '', cedula: '', edad: '', cama: '', sala: ''
+    },
+    motivo: '',
+    diagnosticoPresuntivo: '',
+    urgencia: 'rutina',          // urgente | prioritario | rutina
+    funcionarioAsignado: '',
+    estado: 'pendiente',         // pendiente | en_evaluacion | respondida | descartada
+    fechaRespuesta: '',
+    respuesta: '',
+    recomendaciones: '',
+    notas: '',
+    creadoPor: getCurrentUser() || '',
+    creado: new Date().toISOString(),
+    modificado: new Date().toISOString()
+  };
+}
+
+const SERVICIOS_SOLICITANTES = [
+  'Urgencias', 'Medicina Interna', 'UCI / Cuidados Intensivos',
+  'Cirugía General', 'Neurocirugía', 'Cardiología', 'Neumología',
+  'Endocrinología', 'Nefrología', 'Hematología', 'Infectología',
+  'Pediatría', 'Ginecología', 'Geriatría', 'Reumatología',
+  'Psiquiatría', 'Oncología', 'Anestesiología', 'Otro'
+];
+
+const URGENCIAS_IC = ['urgente', 'prioritario', 'rutina'];
+
 /* ---------- Usuario actual del dispositivo ---------- */
 function getCurrentUser() {
   return localStorage.getItem(CURRENT_USER_KEY) || '';
@@ -1139,9 +1174,9 @@ const Sync = {
           const remote = snap.exists ? snap.data() : null;
           if (remote && remote.patients) {
             const localStr = JSON.stringify(State.data);
-            const remoteStr = JSON.stringify({ patients: remote.patients, programas: remote.programas || [], egresos: remote.egresos || [], config: remote.config || State.data.config, lastWrite: remote.lastWrite });
+            const remoteStr = JSON.stringify({ patients: remote.patients, programas: remote.programas || [], egresos: remote.egresos || [], interconsultasEntrantes: remote.interconsultasEntrantes || [], config: remote.config || State.data.config, lastWrite: remote.lastWrite });
             if (localStr !== remoteStr) {
-              State.data = { patients: remote.patients, programas: remote.programas || [], egresos: remote.egresos || [], config: remote.config || State.data.config, lastWrite: remote.lastWrite };
+              State.data = { patients: remote.patients, programas: remote.programas || [], egresos: remote.egresos || [], interconsultasEntrantes: remote.interconsultasEntrantes || [], config: remote.config || State.data.config, lastWrite: remote.lastWrite };
               State._migrar();
               try { localStorage.setItem(STORAGE_KEY, JSON.stringify(State.data)); } catch(e){}
               if (App.render) App.render();
@@ -1190,6 +1225,7 @@ const Sync = {
         patients: State.data.patients || [],
         programas: State.data.programas || [],
         egresos: State.data.egresos || [],
+        interconsultasEntrantes: State.data.interconsultasEntrantes || [],
         config: State.data.config || {},
         lastWrite: Date.now()
       };
@@ -1236,6 +1272,7 @@ const State = {
     if (!this.data.patients) this.data.patients = [];
     if (!this.data.programas) this.data.programas = [];
     if (!this.data.egresos) this.data.egresos = [];
+    if (!this.data.interconsultasEntrantes) this.data.interconsultasEntrantes = [];
     this._migrar();
   },
   // Migrar datos antiguos al nuevo formato y sembrar catálogos si faltan
@@ -2298,11 +2335,25 @@ service cloud.firestore {
       total += calcularAlertasPaciente(p).filter(a => a.tipo==='red' || a.tipo==='yellow').length;
     });
     const badge = document.getElementById('alertCount');
-    if (total > 0) {
-      badge.style.display = 'inline-block';
-      badge.textContent = total;
-    } else {
-      badge.style.display = 'none';
+    if (badge) {
+      if (total > 0) {
+        badge.style.display = 'inline-block';
+        badge.textContent = total;
+      } else {
+        badge.style.display = 'none';
+      }
+    }
+    // Badge de IC pendientes
+    const icPend = (State.data.interconsultasEntrantes || [])
+      .filter(ic => ic.estado === 'pendiente' || ic.estado === 'en_evaluacion').length;
+    const icBadge = document.getElementById('icRecCount');
+    if (icBadge) {
+      if (icPend > 0) {
+        icBadge.style.display = 'inline-block';
+        icBadge.textContent = icPend;
+      } else {
+        icBadge.style.display = 'none';
+      }
     }
   },
 
@@ -2320,6 +2371,7 @@ service cloud.firestore {
     if (t === 'lista') view.innerHTML = this.renderLista(false);
     else if (t === 'cirugia') view.innerHTML = this.renderCirugia();
     else if (t === 'programa') view.innerHTML = this.renderPrograma();
+    else if (t === 'icrecibidas') view.innerHTML = this.renderICRecibidas();
     else if (t === 'salidas') view.innerHTML = this.renderSalidas();
     else if (t === 'reportes') view.innerHTML = this.renderReportes();
     else if (t === 'alertas') view.innerHTML = this.renderAlertas();
@@ -2397,7 +2449,14 @@ service cloud.firestore {
       infeccion: base.filter(p => tieneInfeccion(p)).length,
       hoy: base.filter(p => idsHoy.has(p.id)).length,
       sinprog: base.filter(p => evaluarAptoCirugia(p).listo && !idsProgramados.has(p.id)).length,
-      misPacientes: yo ? base.filter(p => (p.cirujano||'').toLowerCase().includes(yo.toLowerCase()) || ((p.cirujano||'').toLowerCase().split(' ').some(w => w && yo.toLowerCase().includes(w)))).length : 0
+      misPacientes: yo ? base.filter(p => {
+        const cir = (p.cirujano||'').toLowerCase();
+        if (!cir) return false;
+        const prefijos = ['dr','dra','dr.','dra.','doctor','doctora','lic','lic.','sra','sra.','sr','sr.'];
+        const palabrasYo = yo.toLowerCase().split(/\s+/).filter(w => w.length > 2 && !prefijos.includes(w));
+        if (palabrasYo.length === 0) return false;
+        return palabrasYo.some(w => cir.includes(w));
+      }).length : 0
     };
   },
 
@@ -2429,8 +2488,10 @@ service cloud.firestore {
       if (!yo) return true;
       const cir = (p.cirujano||'').toLowerCase();
       if (!cir) return false;
-      // Coincidencia por inclusión de palabras (apellido suele bastar)
-      const palabrasYo = yo.split(' ').filter(w => w.length > 2);
+      // Excluir prefijos para evitar falsos positivos
+      const prefijos = ['dr','dra','dr.','dra.','doctor','doctora','lic','lic.','sra','sra.','sr','sr.'];
+      const palabrasYo = yo.split(/\s+/).filter(w => w.length > 2 && !prefijos.includes(w));
+      if (palabrasYo.length === 0) return false;
       return palabrasYo.some(w => cir.includes(w));
     }
     return true;
@@ -3348,6 +3409,447 @@ service cloud.firestore {
     prg.revisado = true;
     State.save();
     this.closeModal();
+    this.render();
+  },
+
+  /* ============================================================
+     INTERCONSULTAS RECIBIDAS — solicitudes de otros servicios a ortopedia
+     ============================================================ */
+  _currentICEntranteId: null,
+  _filtroICEntrante: 'todas',  // todas | pendientes | mias | urgentes | hoy | mes
+
+  renderICRecibidas() {
+    if (this._currentICEntranteId) {
+      return this.renderICEntranteDetalle(this._currentICEntranteId);
+    }
+
+    const todas = (State.data.interconsultasEntrantes || []).slice()
+      .sort((a,b) => {
+        // Pendientes primero (ordenadas por fecha desc), luego respondidas/descartadas
+        const ap = (a.estado === 'pendiente' || a.estado === 'en_evaluacion') ? 0 : 1;
+        const bp = (b.estado === 'pendiente' || b.estado === 'en_evaluacion') ? 0 : 1;
+        if (ap !== bp) return ap - bp;
+        // Dentro del grupo, urgentes primero
+        const au = a.urgencia === 'urgente' ? 0 : (a.urgencia === 'prioritario' ? 1 : 2);
+        const bu = b.urgencia === 'urgente' ? 0 : (b.urgencia === 'prioritario' ? 1 : 2);
+        if (au !== bu) return au - bu;
+        return (b.fechaSolicitud || '').localeCompare(a.fechaSolicitud || '');
+      });
+
+    const counts = this._countsICEntrante(todas);
+    const filtradas = todas.filter(ic => this._matchesICFilter(ic));
+
+    let html = `
+      <div class="toolbar no-print">
+        <h2 style="margin:0">Interconsultas recibidas (${todas.length})</h2>
+        <div style="flex:1"></div>
+        <button class="btn small" onclick="App.crearICEntrante()">+ Nueva interconsulta</button>
+        <button class="btn ghost small" onclick="window.print()">🖨</button>
+      </div>
+
+      <div class="filter-chips no-print">
+        ${this._chipIC('todas','Todas',counts.todas)}
+        ${this._chipIC('pendientes','Pendientes',counts.pendientes)}
+        ${this._chipIC('urgentes','Urgentes',counts.urgentes)}
+        ${this._chipIC('mias','Asignadas a mí',counts.mias)}
+        ${this._chipIC('hoy','Hoy',counts.hoy)}
+        ${this._chipIC('respondidas','Respondidas',counts.respondidas)}
+      </div>
+
+      <div class="kpi-grid">
+        <div class="kpi red">
+          <div class="kpi-label">Pendientes urgentes</div>
+          <div class="kpi-value">${counts.urgentesPendientes}</div>
+          <div class="kpi-sub">requieren atención inmediata</div>
+        </div>
+        <div class="kpi yellow">
+          <div class="kpi-label">Total pendientes</div>
+          <div class="kpi-value">${counts.pendientes}</div>
+          <div class="kpi-sub">por responder</div>
+        </div>
+        <div class="kpi green">
+          <div class="kpi-label">Respondidas hoy</div>
+          <div class="kpi-value">${counts.respondidasHoy}</div>
+          <div class="kpi-sub">en las últimas 24 h</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Total este mes</div>
+          <div class="kpi-value">${counts.mes}</div>
+          <div class="kpi-sub">solicitudes recibidas</div>
+        </div>
+      </div>
+    `;
+
+    if (filtradas.length === 0) {
+      html += `<div class="empty">
+        <div class="ico">📨</div>
+        <div>${todas.length === 0 ? 'No hay interconsultas registradas.' : 'Sin resultados con este filtro.'}</div>
+        ${todas.length === 0 ? `<div style="margin-top:10px"><button class="btn" onclick="App.crearICEntrante()">+ Registrar primera interconsulta</button></div>` : ''}
+      </div>`;
+      return html;
+    }
+
+    // Print: tabla compacta
+    html += `<div class="card print-only">
+      <table>
+        <thead><tr>
+          <th>Fecha</th><th>Servicio</th><th>Paciente</th><th>Cama</th>
+          <th>Motivo</th><th>Urgencia</th><th>Asignado</th><th>Estado</th>
+        </tr></thead>
+        <tbody>
+          ${filtradas.map(ic => `<tr>
+            <td>${escapeHtml((ic.fechaSolicitud||'').slice(0,10))}</td>
+            <td>${escapeHtml(ic.servicioSolicitante||'')}</td>
+            <td>${escapeHtml(ic.paciente?.nombre||'')}</td>
+            <td>${escapeHtml(ic.paciente?.cama||'—')}</td>
+            <td>${escapeHtml(ic.motivo||'')}</td>
+            <td>${escapeHtml(ic.urgencia||'')}</td>
+            <td>${escapeHtml(ic.funcionarioAsignado||'')}</td>
+            <td>${escapeHtml(this._estadoLabel(ic.estado))}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+
+    // Tarjetas interactivas
+    html += `<div class="no-print">${filtradas.map(ic => this._renderICEntranteCard(ic)).join('')}</div>`;
+    return html;
+  },
+
+  _chipIC(tipo, label, count) {
+    return `<button class="chip ${this._filtroICEntrante===tipo?'active':''}" onclick="App.setFiltroIC('${tipo}')">${label}<span class="count">${count}</span></button>`;
+  },
+
+  setFiltroIC(tipo) {
+    this._filtroICEntrante = tipo;
+    this.render();
+  },
+
+  _matchesICFilter(ic) {
+    const f = this._filtroICEntrante;
+    if (!f || f === 'todas') return true;
+    if (f === 'pendientes') return ic.estado === 'pendiente' || ic.estado === 'en_evaluacion';
+    if (f === 'respondidas') return ic.estado === 'respondida';
+    if (f === 'urgentes') return ic.urgencia === 'urgente';
+    if (f === 'mias') {
+      const yo = (getCurrentUser()||'').toLowerCase();
+      if (!yo) return false;
+      const asig = (ic.funcionarioAsignado||'').toLowerCase();
+      // Excluir prefijos genéricos para evitar falsos positivos (dr., dra., doctor, etc.)
+      const prefijos = ['dr','dra','dr.','dra.','doctor','doctora','lic','lic.','sra','sra.','sr','sr.'];
+      const palabrasYo = yo.split(/\s+/).filter(w => w.length > 2 && !prefijos.includes(w));
+      if (palabrasYo.length === 0) return false;
+      return palabrasYo.some(w => asig.includes(w));
+    }
+    if (f === 'hoy') return (ic.fechaSolicitud||'').slice(0,10) === todayISO();
+    return true;
+  },
+
+  _countsICEntrante(todas) {
+    const yo = (getCurrentUser()||'').toLowerCase();
+    const prefijos = ['dr','dra','dr.','dra.','doctor','doctora','lic','lic.','sra','sra.','sr','sr.'];
+    const palabrasYo = yo.split(/\s+/).filter(w => w.length > 2 && !prefijos.includes(w));
+    const hoy = todayISO();
+    const ymActual = hoy.slice(0,7);
+    const hace24h = new Date(Date.now() - 24*60*60*1000).toISOString();
+    return {
+      todas: todas.length,
+      pendientes: todas.filter(ic => ic.estado === 'pendiente' || ic.estado === 'en_evaluacion').length,
+      urgentes: todas.filter(ic => ic.urgencia === 'urgente').length,
+      urgentesPendientes: todas.filter(ic => ic.urgencia === 'urgente' && (ic.estado === 'pendiente' || ic.estado === 'en_evaluacion')).length,
+      respondidas: todas.filter(ic => ic.estado === 'respondida').length,
+      respondidasHoy: todas.filter(ic => ic.estado === 'respondida' && (ic.fechaRespuesta||'') >= hace24h).length,
+      hoy: todas.filter(ic => (ic.fechaSolicitud||'').slice(0,10) === hoy).length,
+      mes: todas.filter(ic => (ic.fechaSolicitud||'').slice(0,7) === ymActual).length,
+      mias: (yo && palabrasYo.length > 0) ? todas.filter(ic => {
+        const asig = (ic.funcionarioAsignado||'').toLowerCase();
+        return palabrasYo.some(w => asig.includes(w));
+      }).length : 0
+    };
+  },
+
+  _estadoLabel(estado) {
+    if (estado === 'pendiente') return 'Pendiente';
+    if (estado === 'en_evaluacion') return 'En evaluación';
+    if (estado === 'respondida') return 'Respondida';
+    if (estado === 'descartada') return 'Descartada';
+    return estado || 'Pendiente';
+  },
+
+  _renderICEntranteCard(ic) {
+    const fechaFmt = (ic.fechaSolicitud||'').slice(0,10);
+    const horas = ic.fechaSolicitud ? new Date(ic.fechaSolicitud).toLocaleTimeString('es', {hour:'2-digit', minute:'2-digit'}) : '';
+    const urgenciaTag = ic.urgencia === 'urgente'
+      ? '<span class="tag red">⚠ URGENTE</span>'
+      : ic.urgencia === 'prioritario'
+        ? '<span class="tag yellow">Prioritario</span>'
+        : '<span class="tag gray">Rutina</span>';
+    const estadoTag = ic.estado === 'respondida'
+      ? '<span class="tag green">✓ Respondida</span>'
+      : ic.estado === 'descartada'
+        ? '<span class="tag gray">Descartada</span>'
+        : ic.estado === 'en_evaluacion'
+          ? '<span class="tag blue">En evaluación</span>'
+          : '<span class="tag yellow">Pendiente</span>';
+
+    let cls = 'patient-card';
+    if (ic.urgencia === 'urgente' && ic.estado !== 'respondida') cls += ' alert';
+    else if (ic.estado === 'respondida') cls += ' ready';
+    else if (ic.estado === 'pendiente' || ic.estado === 'en_evaluacion') cls += ' warn';
+
+    const dias = ic.fechaSolicitud ? Math.floor((Date.now() - new Date(ic.fechaSolicitud).getTime()) / (1000*60*60*24)) : 0;
+    const horasPendiente = ic.fechaSolicitud && (ic.estado === 'pendiente' || ic.estado === 'en_evaluacion')
+      ? Math.floor((Date.now() - new Date(ic.fechaSolicitud).getTime()) / (1000*60*60))
+      : null;
+
+    return `
+      <div class="${cls}" onclick="App.abrirICEntrante('${ic.id}')">
+        <div class="pc-row">
+          <div class="pc-info">
+            <div class="pc-name">
+              ${escapeHtml(ic.paciente?.nombre || '(sin nombre paciente)')}
+              ${urgenciaTag}
+              ${estadoTag}
+            </div>
+            <div class="pc-meta">
+              <strong>De:</strong> ${escapeHtml(ic.servicioSolicitante || '(sin servicio)')}
+              ${ic.paciente?.cama ? ` · Cama ${escapeHtml(ic.paciente.cama)}` : ''}
+              ${ic.paciente?.sala ? ` · Sala ${escapeHtml(ic.paciente.sala)}` : ''}
+              · ${fechaFmt} ${horas}
+            </div>
+            <div class="pc-meta" style="margin-top:4px">
+              <strong>Motivo:</strong> ${escapeHtml(ic.motivo || '(sin especificar)')}
+            </div>
+            ${ic.diagnosticoPresuntivo ? `<div class="pc-meta"><strong>Dx presuntivo:</strong> ${escapeHtml(ic.diagnosticoPresuntivo)}</div>` : ''}
+            <div class="pc-meta">
+              <strong>Asignado a:</strong> ${escapeHtml(ic.funcionarioAsignado || '(sin asignar)')}
+              ${horasPendiente !== null ? ` · ${horasPendiente} h pendiente` : ''}
+            </div>
+            ${ic.estado === 'respondida' && ic.respuesta
+              ? `<div class="pc-meta" style="margin-top:6px;color:#065f46"><strong>Respuesta:</strong> ${escapeHtml(ic.respuesta.slice(0,150))}${ic.respuesta.length>150?'...':''}</div>`
+              : ''}
+          </div>
+        </div>
+      </div>
+    `;
+  },
+
+  renderICEntranteDetalle(id) {
+    const ic = (State.data.interconsultasEntrantes || []).find(x => x.id === id);
+    if (!ic) {
+      this._currentICEntranteId = null;
+      return this.renderICRecibidas();
+    }
+    if (!ic.paciente) ic.paciente = { nombre:'', cedula:'', edad:'', cama:'', sala:'' };
+    const cfg = getConfig();
+    const cirujanos = getCatalogo('cirujanos');
+    const usuariosLista = listaUsuarios().map(u => u.nombre);
+    // Combinar staff y usuarios para asignación
+    const personasAsignables = [...new Set([...cirujanos, ...usuariosLista])].sort();
+
+    return `
+      <div class="print-only">
+        ${cfg.hospitalNombre ? `<div class="print-sub" style="font-weight:700">${escapeHtml(cfg.hospitalNombre)}</div>` : ''}
+        <div class="print-title">Interconsulta — Servicio de ${escapeHtml(cfg.servicio||'Ortopedia')}</div>
+        <div class="print-sub">${new Date().toLocaleString('es')}</div>
+      </div>
+
+      <div class="toolbar no-print">
+        <button class="btn ghost small" onclick="App.cerrarICEntrante()">← Volver</button>
+        <h2 style="margin:0">Interconsulta</h2>
+        <div style="flex:1"></div>
+        <button class="btn ghost small" onclick="window.print()">🖨 Imprimir</button>
+        <button class="btn danger small" onclick="App.eliminarICEntrante('${ic.id}')">Eliminar</button>
+      </div>
+
+      <!-- Datos de solicitud -->
+      <div class="card">
+        <h3>Solicitud</h3>
+        <div class="field-row">
+          <div class="field" style="margin-bottom:0">
+            <label>Fecha y hora de solicitud</label>
+            <input type="datetime-local" value="${escapeHtml((ic.fechaSolicitud||'').slice(0,16))}"
+              onchange="App.setICEntrante('${ic.id}','fechaSolicitud',this.value ? this.value+':00.000Z' : '')">
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>Servicio solicitante</label>
+            <input list="serviciosSolicitantesList" value="${escapeHtml(ic.servicioSolicitante||'')}"
+              onchange="App.setICEntrante('${ic.id}','servicioSolicitante',this.value)"
+              placeholder="Ej. Medicina Interna">
+            <datalist id="serviciosSolicitantesList">
+              ${SERVICIOS_SOLICITANTES.map(s => `<option value="${escapeHtml(s)}">`).join('')}
+            </datalist>
+          </div>
+        </div>
+        <div class="field-row" style="margin-top:8px">
+          <div class="field" style="margin-bottom:0">
+            <label>Urgencia</label>
+            <select onchange="App.setICEntrante('${ic.id}','urgencia',this.value)">
+              ${URGENCIAS_IC.map(u => `<option value="${u}" ${ic.urgencia===u?'selected':''}>${u.charAt(0).toUpperCase()+u.slice(1)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>Estado</label>
+            <select onchange="App.setICEntrante('${ic.id}','estado',this.value)">
+              <option value="pendiente" ${ic.estado==='pendiente'?'selected':''}>Pendiente</option>
+              <option value="en_evaluacion" ${ic.estado==='en_evaluacion'?'selected':''}>En evaluación</option>
+              <option value="respondida" ${ic.estado==='respondida'?'selected':''}>Respondida</option>
+              <option value="descartada" ${ic.estado==='descartada'?'selected':''}>Descartada</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Datos del paciente -->
+      <div class="card">
+        <h3>Datos del paciente consultado</h3>
+        <div class="field-row">
+          <div class="field" style="margin-bottom:0">
+            <label>Nombre</label>
+            <input value="${escapeHtml(ic.paciente.nombre||'')}" oninput="App.setICEntrantePaciente('${ic.id}','nombre',this.value)">
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>Cédula / ID</label>
+            <input value="${escapeHtml(ic.paciente.cedula||'')}" oninput="App.setICEntrantePaciente('${ic.id}','cedula',this.value)">
+          </div>
+        </div>
+        <div class="field-row" style="margin-top:8px">
+          <div class="field" style="margin-bottom:0">
+            <label>Edad</label>
+            <input type="number" min="0" value="${escapeHtml(ic.paciente.edad||'')}" oninput="App.setICEntrantePaciente('${ic.id}','edad',this.value)">
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>Cama</label>
+            <input value="${escapeHtml(ic.paciente.cama||'')}" oninput="App.setICEntrantePaciente('${ic.id}','cama',this.value)">
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>Sala / Servicio donde está</label>
+            <input value="${escapeHtml(ic.paciente.sala||'')}" oninput="App.setICEntrantePaciente('${ic.id}','sala',this.value)" placeholder="Ej. Sala 3, UCI, Urgencias">
+          </div>
+        </div>
+      </div>
+
+      <!-- Motivo de consulta -->
+      <div class="card">
+        <h3>Motivo de la interconsulta</h3>
+        <div class="field" style="margin-bottom:0">
+          <label>Pregunta clínica / motivo *</label>
+          <textarea rows="3" placeholder="Ej. Paciente con fractura tibial, evaluar manejo quirúrgico vs conservador"
+            oninput="App.setICEntrante('${ic.id}','motivo',this.value)">${escapeHtml(ic.motivo||'')}</textarea>
+        </div>
+        <div class="field" style="margin-top:8px;margin-bottom:0">
+          <label>Diagnóstico presuntivo</label>
+          <input value="${escapeHtml(ic.diagnosticoPresuntivo||'')}" oninput="App.setICEntrante('${ic.id}','diagnosticoPresuntivo',this.value)">
+        </div>
+        <div class="field" style="margin-top:8px;margin-bottom:0">
+          <label>Notas adicionales</label>
+          <textarea rows="2" oninput="App.setICEntrante('${ic.id}','notas',this.value)">${escapeHtml(ic.notas||'')}</textarea>
+        </div>
+      </div>
+
+      <!-- Asignación -->
+      <div class="card">
+        <h3>Funcionario de ortopedia asignado</h3>
+        <div class="field" style="margin-bottom:0">
+          <label>A cargo del caso</label>
+          <input list="asignablesList" value="${escapeHtml(ic.funcionarioAsignado||'')}"
+            oninput="App.setICEntrante('${ic.id}','funcionarioAsignado',this.value)"
+            placeholder="Empieza a escribir...">
+          <datalist id="asignablesList">
+            ${personasAsignables.map(n => `<option value="${escapeHtml(n)}">`).join('')}
+          </datalist>
+        </div>
+        ${ic.creadoPor ? `<div class="muted" style="font-size:.8rem;margin-top:6px">Registrada por: ${escapeHtml(ic.creadoPor)}</div>` : ''}
+      </div>
+
+      <!-- Respuesta -->
+      <div class="card">
+        <h3>Respuesta de ortopedia</h3>
+        <div class="field-row">
+          <div class="field" style="margin-bottom:0">
+            <label>Fecha de respuesta</label>
+            <input type="datetime-local" value="${escapeHtml((ic.fechaRespuesta||'').slice(0,16))}"
+              onchange="App.setICEntrante('${ic.id}','fechaRespuesta',this.value ? this.value+':00.000Z' : '')">
+          </div>
+        </div>
+        <div class="field" style="margin-top:8px;margin-bottom:0">
+          <label>Respuesta clínica / impresión diagnóstica</label>
+          <textarea rows="4" class="no-print"
+            placeholder="Hallazgos al examen físico, impresión diagnóstica, conducta sugerida..."
+            oninput="App.setICEntrante('${ic.id}','respuesta',this.value)">${escapeHtml(ic.respuesta||'')}</textarea>
+          <div class="print-only" style="white-space:pre-wrap">${escapeHtml(ic.respuesta||'—')}</div>
+        </div>
+        <div class="field" style="margin-top:8px;margin-bottom:0">
+          <label>Recomendaciones / plan</label>
+          <textarea rows="3" class="no-print"
+            placeholder="Estudios complementarios, manejo, signos de alarma, traslado a ortopedia si aplica..."
+            oninput="App.setICEntrante('${ic.id}','recomendaciones',this.value)">${escapeHtml(ic.recomendaciones||'')}</textarea>
+          <div class="print-only" style="white-space:pre-wrap">${escapeHtml(ic.recomendaciones||'—')}</div>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap" class="no-print">
+          <button class="btn success small" onclick="App.marcarICRespondida('${ic.id}')">✓ Marcar respondida (con fecha actual)</button>
+          <button class="btn ghost small" onclick="App.setICEntrante('${ic.id}','estado','en_evaluacion');App.render()">En evaluación</button>
+        </div>
+      </div>
+
+      <!-- Pie impresión -->
+      <div class="print-only" style="margin-top:24px;border-top:1px solid #ccc;padding-top:12px">
+        <div style="display:flex;justify-content:space-between;font-size:.9em">
+          <div>Funcionario respondedor: ${escapeHtml(ic.funcionarioAsignado||'_______________________')}</div>
+          <div>Firma: _______________________</div>
+        </div>
+      </div>
+    `;
+  },
+
+  /* ---------- Acciones IC entrantes ---------- */
+  abrirICEntrante(id) {
+    this._currentICEntranteId = id;
+    this.render();
+    window.scrollTo({top:0});
+  },
+  cerrarICEntrante() {
+    this._currentICEntranteId = null;
+    this.render();
+  },
+  crearICEntrante() {
+    debounceAction('crearICEntrante', () => {
+      if (!State.data.interconsultasEntrantes) State.data.interconsultasEntrantes = [];
+      const ic = nuevaICEntrante();
+      State.data.interconsultasEntrantes.push(ic);
+      State.save();
+      this.abrirICEntrante(ic.id);
+    });
+  },
+  setICEntrante(id, campo, valor) {
+    const ic = (State.data.interconsultasEntrantes||[]).find(x => x.id === id);
+    if (!ic) return;
+    ic[campo] = valor;
+    ic.modificado = new Date().toISOString();
+    State.save();
+  },
+  setICEntrantePaciente(id, campo, valor) {
+    const ic = (State.data.interconsultasEntrantes||[]).find(x => x.id === id);
+    if (!ic) return;
+    if (!ic.paciente) ic.paciente = { nombre:'', cedula:'', edad:'', cama:'', sala:'' };
+    ic.paciente[campo] = valor;
+    ic.modificado = new Date().toISOString();
+    State.save();
+  },
+  marcarICRespondida(id) {
+    const ic = (State.data.interconsultasEntrantes||[]).find(x => x.id === id);
+    if (!ic) return;
+    ic.estado = 'respondida';
+    if (!ic.fechaRespuesta) ic.fechaRespuesta = new Date().toISOString();
+    ic.modificado = new Date().toISOString();
+    State.save();
+    this.render();
+  },
+  eliminarICEntrante(id) {
+    if (!confirm('¿Eliminar esta interconsulta? No se puede deshacer.')) return;
+    State.data.interconsultasEntrantes = (State.data.interconsultasEntrantes||[]).filter(x => x.id !== id);
+    State.save();
+    this._currentICEntranteId = null;
     this.render();
   },
 
