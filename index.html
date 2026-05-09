@@ -380,6 +380,7 @@
 <nav class="tabs no-print" id="tabs">
   <button data-tab="lista" class="active" onclick="App.switchTab('lista')">Pase de visita</button>
   <button data-tab="cirugia" onclick="App.switchTab('cirugia')">Listos para cirugía</button>
+  <button data-tab="programa" onclick="App.switchTab('programa')">Programa Qx</button>
   <button data-tab="alertas" onclick="App.switchTab('alertas')">Alertas <span class="badge" id="alertCount" style="display:none">0</span></button>
   <button data-tab="todos" onclick="App.switchTab('todos')">Todos</button>
 </nav>
@@ -396,7 +397,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v1.4-search-fix-2026-05-08';
+const APP_VERSION = 'v1.5-programa-qx-2026-05-08';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -480,8 +481,33 @@ function nuevoPaciente() {
     laboratorios: [],   // {id, fecha, valores:{Hb,Hct,Leu,Plt,Cr,BUN,Glu,Na,K,Ca,PCR,VES,...}, nota}
     interconsultas: [], // {id,fechaSolicitud,servicio,motivo,respondida,fechaRespuesta,respuesta}
     controlInfeccion: [], // {fecha,rxRepetido,examenesRepetidos,nota}
+    programaQx: {
+      programado: false,
+      fechaProgramada: '',     // ISO date
+      procedimiento: '',
+      insumos: '',
+      lateralidad: '',         // derecha / izquierda / bilateral / no aplica
+      requerimientoSangre: '', // tipo y cruce / N unidades / ninguno
+      medicoCargo: '',
+      anestesia: '',
+      observaciones: '',
+      estado: '',              // '' / programado / realizado / suspendido
+      fechaRealizado: ''
+    },
     historial: []       // {fecha, accion, detalle}
   };
+}
+
+// Devuelve el objeto programaQx de un paciente, con defaults si falta (para migrar pacientes viejos)
+function getProgramaQx(p) {
+  if (!p.programaQx) {
+    p.programaQx = {
+      programado:false, fechaProgramada:'', procedimiento:'', insumos:'',
+      lateralidad:'', requerimientoSangre:'', medicoCargo:'', anestesia:'',
+      observaciones:'', estado:'', fechaRealizado:''
+    };
+  }
+  return p.programaQx;
 }
 
 /* ---------- Sincronización en la nube (Firebase Firestore) ---------- */
@@ -1022,6 +1048,7 @@ service cloud.firestore {
     const t = State.currentTab;
     if (t === 'lista') view.innerHTML = this.renderLista(false);
     else if (t === 'cirugia') view.innerHTML = this.renderCirugia();
+    else if (t === 'programa') view.innerHTML = this.renderPrograma();
     else if (t === 'alertas') view.innerHTML = this.renderAlertas();
     else if (t === 'todos') view.innerHTML = this.renderLista(true);
     this.refreshAlertCount();
@@ -1224,6 +1251,189 @@ service cloud.firestore {
     return html;
   },
 
+  /* ---------- Programa quirúrgico ---------- */
+  renderPrograma() {
+    const programados = State.data.patients
+      .filter(p => p.programaQx && p.programaQx.programado)
+      .sort((a,b) => {
+        const fa = a.programaQx.fechaProgramada || '9999-99-99';
+        const fb = b.programaQx.fechaProgramada || '9999-99-99';
+        if (fa !== fb) return fa.localeCompare(fb);
+        return (a.cama||'').localeCompare(b.cama||'', 'es', {numeric:true});
+      });
+
+    let html = `
+      <div class="print-only">
+        <div class="print-title">Programa Quirúrgico — Servicio de Ortopedia</div>
+        <div class="print-sub">${new Date().toLocaleString('es')} · ${programados.length} cirugía(s) programada(s)</div>
+      </div>
+
+      <div class="toolbar no-print">
+        <h2 style="margin:0">Programa Quirúrgico (${programados.length})</h2>
+        <div style="flex:1"></div>
+        <button class="btn small" onclick="App.openSelectorPrograma()">+ Agregar al programa</button>
+        <button class="btn ghost small" onclick="window.print()">🖨 Imprimir</button>
+      </div>
+    `;
+
+    if (programados.length === 0) {
+      html += `<div class="empty">
+        <div class="ico">📋</div>
+        <div>No hay cirugías programadas.</div>
+        <div style="margin-top:10px"><button class="btn" onclick="App.openSelectorPrograma()">+ Agregar al programa</button></div>
+      </div>`;
+      return html;
+    }
+
+    // Tabla compacta para impresión
+    html += `<div class="card print-only">
+      <table>
+        <thead><tr>
+          <th>Fecha</th><th>Cama</th><th>Paciente</th><th>Cédula</th><th>Edad</th>
+          <th>Diagnóstico</th><th>Procedimiento</th><th>Lat.</th>
+          <th>Sangre</th><th>Insumos</th><th>Cirujano</th><th>Anestesia</th>
+        </tr></thead>
+        <tbody>
+          ${programados.map(p => {
+            const x = p.programaQx;
+            return `<tr>
+              <td>${escapeHtml(x.fechaProgramada||'—')}</td>
+              <td><strong>${escapeHtml(p.cama||'—')}</strong></td>
+              <td>${escapeHtml(p.nombre||'')}</td>
+              <td>${escapeHtml(p.cedula||'')}</td>
+              <td>${escapeHtml(p.edad||'')}</td>
+              <td>${escapeHtml((p.diagnosticos||[]).join('; '))}</td>
+              <td>${escapeHtml(x.procedimiento||'')}</td>
+              <td>${escapeHtml(x.lateralidad||'')}</td>
+              <td>${escapeHtml(x.requerimientoSangre||'—')}</td>
+              <td>${escapeHtml(x.insumos||'—')}</td>
+              <td>${escapeHtml(x.medicoCargo||p.cirujano||'—')}</td>
+              <td>${escapeHtml(x.anestesia||'—')}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+
+    // Tarjetas interactivas
+    html += `<div class="no-print">${programados.map(p => this.renderProgramaCard(p)).join('')}</div>`;
+    return html;
+  },
+
+  renderProgramaCard(p) {
+    const x = p.programaQx;
+    const apto = evaluarAptoCirugia(p);
+    const dias = daysBetween(p.fechaIngreso);
+    const cls = x.estado === 'realizado' ? 'patient-card ready'
+              : x.estado === 'suspendido' ? 'patient-card alert'
+              : (apto.listo ? 'patient-card' : 'patient-card warn');
+
+    return `
+      <div class="${cls}" onclick="App.openPacienteEnPrograma('${p.id}')">
+        <div class="pc-row">
+          <div class="pc-bed">${escapeHtml(p.cama||'?')}</div>
+          <div class="pc-info">
+            <div class="pc-name">${escapeHtml(p.nombre || '(sin nombre)')}
+              ${x.estado==='realizado'?'<span class="tag green" style="margin-left:6px">Realizado</span>':''}
+              ${x.estado==='suspendido'?'<span class="tag red" style="margin-left:6px">Suspendido</span>':''}
+              ${!x.estado||x.estado==='programado'?'<span class="tag blue" style="margin-left:6px">Programado</span>':''}
+              ${!apto.listo && x.estado!=='realizado' && x.estado!=='suspendido'?'<span class="tag yellow" style="margin-left:6px">Ya no apto</span>':''}
+            </div>
+            <div class="pc-meta">
+              ${escapeHtml(p.cedula||'—')} · ${escapeHtml(p.edad||'?')} años · ${dias} día(s) hosp.
+            </div>
+            <div class="pc-meta" style="margin-top:4px">
+              <strong>Dx:</strong> ${escapeHtml((p.diagnosticos||[]).join(', ') || '—')}
+            </div>
+            <div class="pc-meta" style="margin-top:4px">
+              <strong>Procedimiento:</strong> ${escapeHtml(x.procedimiento||'—')}
+              ${x.lateralidad?` · <strong>Lat:</strong> ${escapeHtml(x.lateralidad)}`:''}
+            </div>
+            <div class="pc-meta">
+              <strong>Sangre:</strong> ${escapeHtml(x.requerimientoSangre||'—')} ·
+              <strong>Cirujano:</strong> ${escapeHtml(x.medicoCargo||p.cirujano||'—')}
+              ${x.fechaProgramada?` · <strong>Fecha:</strong> ${fmtDate(x.fechaProgramada)}`:''}
+            </div>
+            ${x.insumos?`<div class="pc-meta" style="margin-top:4px"><strong>Insumos:</strong> ${escapeHtml(x.insumos)}</div>`:''}
+            ${x.anestesia?`<div class="pc-meta"><strong>Anestesia:</strong> ${escapeHtml(x.anestesia)}</div>`:''}
+            ${x.observaciones?`<div class="pc-meta"><strong>Obs:</strong> ${escapeHtml(x.observaciones)}</div>`:''}
+          </div>
+        </div>
+      </div>
+    `;
+  },
+
+  // Selector: lista pacientes listos para cirugía y permite agregarlos al programa
+  openSelectorPrograma() {
+    const candidatos = State.data.patients
+      .filter(p => !p.fechaEgreso)
+      .filter(p => evaluarAptoCirugia(p).listo)
+      .filter(p => !(p.programaQx && p.programaQx.programado))
+      .sort((a,b) => (a.cama||'').localeCompare(b.cama||'', 'es', {numeric:true}));
+
+    const html = `
+      <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
+        <div class="modal" style="max-width:600px">
+          <div class="modal-head">
+            <div>
+              <div style="font-weight:600">Agregar al programa quirúrgico</div>
+              <div style="font-size:.8rem;opacity:.9">Selecciona un paciente listo para cirugía</div>
+            </div>
+            <button class="close-x" onclick="App.closeModal()">✕</button>
+          </div>
+          <div class="modal-body">
+            ${candidatos.length === 0 ? `
+              <div class="empty">
+                <div class="ico">⏳</div>
+                <div>No hay pacientes listos para cirugía sin programar.</div>
+                <div class="muted" style="margin-top:8px">Asegúrate de que los estudios preoperatorios estén completos.</div>
+              </div>
+            ` : candidatos.map(p => `
+              <div class="patient-card ready" onclick="App.agregarAlPrograma('${p.id}')">
+                <div class="pc-row">
+                  <div class="pc-bed">${escapeHtml(p.cama||'?')}</div>
+                  <div class="pc-info">
+                    <div class="pc-name">${escapeHtml(p.nombre||'(sin nombre)')}</div>
+                    <div class="pc-meta">${escapeHtml(p.cedula||'—')} · ${escapeHtml(p.edad||'?')} años</div>
+                    <div class="pc-meta"><strong>Dx:</strong> ${escapeHtml((p.diagnosticos||[]).join(', ')||'—')}</div>
+                    <div class="pc-meta"><strong>Cirujano:</strong> ${escapeHtml(p.cirujano||'—')}</div>
+                  </div>
+                </div>
+              </div>
+            `).join('')}
+
+            <hr>
+            <p class="muted">¿Necesitas programar a un paciente que aún no aparece como "listo"? Abre su ficha desde el pase de visita y completa el preoperatorio. Si quieres programarlo de todas formas (excepción), también puedes hacerlo desde la sub-pestaña "Programa Qx" dentro del paciente.</p>
+          </div>
+          <div class="modal-foot">
+            <button class="btn ghost" onclick="App.closeModal()">Cancelar</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.getElementById('modalRoot').innerHTML = html;
+  },
+
+  agregarAlPrograma(id) {
+    const p = this._findP(id); if (!p) return;
+    const x = getProgramaQx(p);
+    x.programado = true;
+    if (!x.estado) x.estado = 'programado';
+    if (!x.fechaProgramada) x.fechaProgramada = todayISO();
+    if (!x.medicoCargo) x.medicoCargo = p.cirujano || '';
+    logCambio(p, 'Programa Qx', 'Agregado al programa quirúrgico');
+    State.save();
+    this.closeModal();
+    this._modalSubtab = 'programa';
+    this.openPaciente(id);
+  },
+
+  openPacienteEnPrograma(id) {
+    this._modalSubtab = 'programa';
+    this._currentModalId = id;
+    this.renderModal(id);
+  },
+
   /* ---------- Alertas globales ---------- */
   renderAlertas() {
     const items = [];
@@ -1289,6 +1499,7 @@ service cloud.firestore {
     const tabs = [
       ['datos','Datos básicos'],
       ['preop','Preoperatorio'],
+      ['programa','Programa Qx'],
       ['meds','Medicamentos'],
       ['labs','Laboratorios'],
       ['ic','Interconsultas'],
@@ -1299,6 +1510,7 @@ service cloud.firestore {
     let bodyHtml = '';
     if (this._modalSubtab === 'datos') bodyHtml = this.tabDatos(p);
     else if (this._modalSubtab === 'preop') bodyHtml = this.tabPreop(p);
+    else if (this._modalSubtab === 'programa') bodyHtml = this.tabPrograma(p);
     else if (this._modalSubtab === 'meds') bodyHtml = this.tabMeds(p);
     else if (this._modalSubtab === 'labs') bodyHtml = this.tabLabs(p);
     else if (this._modalSubtab === 'ic') bodyHtml = this.tabIC(p);
@@ -1547,6 +1759,117 @@ service cloud.firestore {
         <div class="field" style="margin-top:8px">
           <label>Otra contraindicación</label>
           <input value="${escapeHtml(p.contraindicaciones.otra||'')}" oninput="App.setContra('${p.id}','otra',this.value)">
+        </div>
+      </div>
+    `;
+  },
+
+  /* -------- Programa Quirúrgico (sub-pestaña en la ficha) -------- */
+  tabPrograma(p) {
+    const x = getProgramaQx(p);
+    const apto = evaluarAptoCirugia(p);
+    const lateralidades = ['','Derecha','Izquierda','Bilateral','No aplica'];
+    const sangreOpts = ['','No requiere','Tipo y RH','Tipo y cruce','1 unidad GRE','2 unidades GRE','3 unidades GRE','4 unidades GRE','Reservar GRE + plasma','Otro'];
+    const anestesiaOpts = ['','General','Raquídea','Epidural','Bloqueo regional','Local + sedación','Combinada'];
+    const estadoOpts = ['','programado','realizado','suspendido'];
+
+    const aptoBox = !x.programado
+      ? (apto.listo
+          ? `<div class="alert-box green">Paciente listo para cirugía. Puedes incluirlo en el programa.</div>`
+          : `<div class="alert-box yellow"><strong>Atención:</strong> el paciente aún no cumple criterios para cirugía (${apto.motivo}). Puedes incluirlo igual si es una excepción justificada, pero revisa el preoperatorio.</div>`)
+      : `<div class="alert-box blue">Este paciente está incluido en el programa quirúrgico.</div>`;
+
+    return `
+      ${aptoBox}
+
+      <div class="card">
+        <div class="checkbox-row">
+          <input type="checkbox" id="prog-${p.id}" ${x.programado?'checked':''}
+            onchange="App.toggleProgramado('${p.id}',this.checked)">
+          <label for="prog-${p.id}"><strong>Incluir en el programa quirúrgico</strong></label>
+        </div>
+
+        <div class="field-row" style="margin-top:8px">
+          <div class="field" style="margin-bottom:0">
+            <label>Fecha programada</label>
+            <input type="date" value="${escapeHtml(x.fechaProgramada)}"
+              onchange="App.setPrograma('${p.id}','fechaProgramada',this.value)">
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>Estado</label>
+            <select onchange="App.setPrograma('${p.id}','estado',this.value)">
+              ${estadoOpts.map(e => `<option value="${e}" ${x.estado===e?'selected':''}>${e?e[0].toUpperCase()+e.slice(1):'—'}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+
+        ${x.estado==='realizado'?`
+          <div class="field" style="margin-top:8px;margin-bottom:0">
+            <label>Fecha realizado</label>
+            <input type="date" value="${escapeHtml(x.fechaRealizado||'')}"
+              onchange="App.setPrograma('${p.id}','fechaRealizado',this.value)">
+          </div>
+        `:''}
+      </div>
+
+      <div class="card">
+        <h3>Datos del procedimiento</h3>
+
+        <div class="field">
+          <label>Procedimiento quirúrgico *</label>
+          <textarea rows="2" placeholder="Ej. Reducción abierta y fijación interna con placa LCP de tibia distal"
+            oninput="App.setPrograma('${p.id}','procedimiento',this.value)">${escapeHtml(x.procedimiento)}</textarea>
+        </div>
+
+        <div class="field-row">
+          <div class="field" style="margin-bottom:0">
+            <label>Lateralidad</label>
+            <select onchange="App.setPrograma('${p.id}','lateralidad',this.value)">
+              ${lateralidades.map(l => `<option value="${l}" ${x.lateralidad===l?'selected':''}>${l||'—'}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>Médico a cargo</label>
+            <input value="${escapeHtml(x.medicoCargo||p.cirujano||'')}"
+              oninput="App.setPrograma('${p.id}','medicoCargo',this.value)">
+          </div>
+        </div>
+
+        <div class="field-row" style="margin-top:8px">
+          <div class="field" style="margin-bottom:0">
+            <label>Requerimiento de sangre</label>
+            <select onchange="App.setPrograma('${p.id}','requerimientoSangre',this.value)">
+              ${sangreOpts.map(s => `<option value="${s}" ${x.requerimientoSangre===s?'selected':''}>${s||'—'}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>Tipo de anestesia</label>
+            <select onchange="App.setPrograma('${p.id}','anestesia',this.value)">
+              ${anestesiaOpts.map(a => `<option value="${a}" ${x.anestesia===a?'selected':''}>${a||'—'}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+
+        <div class="field" style="margin-top:8px">
+          <label>Insumos necesarios</label>
+          <textarea rows="3" placeholder="Ej. Placa LCP tibia distal 8 huecos, tornillos corticales 3.5mm, clavo Steinmann, motor de taladro, fluoroscopia"
+            oninput="App.setPrograma('${p.id}','insumos',this.value)">${escapeHtml(x.insumos)}</textarea>
+        </div>
+
+        <div class="field" style="margin-bottom:0">
+          <label>Observaciones</label>
+          <textarea rows="2" placeholder="Notas adicionales relevantes para sala (alergias, antibiótico profiláctico, posición, etc.)"
+            oninput="App.setPrograma('${p.id}','observaciones',this.value)">${escapeHtml(x.observaciones||'')}</textarea>
+        </div>
+      </div>
+
+      <div class="card">
+        <h4>Resumen para la planilla del programa</h4>
+        <div class="muted" style="font-size:.85rem;line-height:1.6">
+          <div><strong>Paciente:</strong> ${escapeHtml(p.nombre||'(sin nombre)')} · ${escapeHtml(p.cedula||'sin cédula')} · ${escapeHtml(p.edad||'?')} años · Cama ${escapeHtml(p.cama||'?')}</div>
+          <div><strong>Diagnóstico:</strong> ${escapeHtml((p.diagnosticos||[]).join('; ')||'—')}</div>
+          <div><strong>Alergias:</strong> ${escapeHtml(p.alergias||'ninguna registrada')}</div>
+          <div><strong>Antecedentes:</strong> ${escapeHtml(p.antecedentesPatologicos||'ninguno')}</div>
         </div>
       </div>
     `;
@@ -1865,6 +2188,33 @@ service cloud.firestore {
     logCambio(p,'Contraindicación',`${campo}: ${val}`);
     State.save();
     this.renderModal(id);
+  },
+
+  // Programa quirúrgico
+  toggleProgramado(id, val) {
+    const p = this._findP(id); if (!p) return;
+    const x = getProgramaQx(p);
+    x.programado = val;
+    if (val) {
+      if (!x.estado) x.estado = 'programado';
+      if (!x.fechaProgramada) x.fechaProgramada = todayISO();
+      if (!x.medicoCargo) x.medicoCargo = p.cirujano || '';
+    }
+    logCambio(p, 'Programa Qx', val ? 'Incluido en programa' : 'Retirado del programa');
+    State.save();
+    this.renderModal(id);
+  },
+  setPrograma(id, campo, val) {
+    const p = this._findP(id); if (!p) return;
+    const x = getProgramaQx(p);
+    x[campo] = val;
+    // Reglas auxiliares
+    if (campo === 'estado') {
+      if (val === 'realizado' && !x.fechaRealizado) x.fechaRealizado = todayISO();
+      if (val) x.programado = (val !== 'suspendido') ? true : x.programado;
+    }
+    State.save();
+    if (campo === 'estado') this.renderModal(id);
   },
 
   // Medicamentos
