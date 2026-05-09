@@ -397,7 +397,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v1.7-prog-solo-listos-2026-05-08';
+const APP_VERSION = 'v1.8-quirofanos-orden-2026-05-08';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -537,6 +537,8 @@ function nuevaEntradaPrograma(pacienteId, defaults) {
   return {
     id: 'pe_' + Date.now().toString(36) + Math.random().toString(36).slice(2,8),
     pacienteId,
+    quirofano: defaults.quirofano || '',
+    orden: defaults.orden || 0,
     procedimiento: defaults.procedimiento || '',
     lateralidad: defaults.lateralidad || '',
     insumos: defaults.insumos || '',
@@ -548,6 +550,29 @@ function nuevaEntradaPrograma(pacienteId, defaults) {
     operado: null,           // null = no revisado, true = sí, false = no
     motivoNoOperado: ''
   };
+}
+
+// Agrupa las entradas de un programa por quirófano y las ordena
+function agruparPorQuirofano(prg) {
+  const grupos = {};
+  (prg.pacientes || []).forEach(e => {
+    const q = e.quirofano || '';
+    if (!grupos[q]) grupos[q] = [];
+    grupos[q].push(e);
+  });
+  // Ordenar cada grupo por campo orden
+  Object.keys(grupos).forEach(q => {
+    grupos[q].sort((a,b) => (a.orden||999) - (b.orden||999));
+  });
+  // Ordenar las claves de quirófano (numéricos primero)
+  const quirofanos = Object.keys(grupos).sort((a,b) => {
+    if (!a) return 1;     // sin asignar al final
+    if (!b) return -1;
+    const na = parseInt(a, 10), nb = parseInt(b, 10);
+    if (!isNaN(na) && !isNaN(nb) && na !== nb) return na - nb;
+    return a.localeCompare(b, 'es', {numeric:true});
+  });
+  return { grupos, quirofanos };
 }
 
 const fmtDateLong = (iso) => {
@@ -1427,20 +1452,32 @@ service cloud.firestore {
         estadoTag = '<span class="tag yellow">Próximo</span>';
       }
 
-      // Lista compacta de los pacientes
-      const previewPacientes = prg.pacientes.slice(0,5).map(e => {
-        const p = State.data.patients.find(x => x.id === e.pacienteId);
-        if (!p) return '';
-        const opTag = e.operado === true ? '<span class="tag green" style="font-size:.7rem">✓ Op</span>'
-                    : e.operado === false ? '<span class="tag red" style="font-size:.7rem">✗ No op</span>'
-                    : '';
-        return `<div style="margin-top:4px;font-size:.85rem">
-          ${opTag} <strong>${escapeHtml(p.cama||'?')}</strong> ${escapeHtml(p.nombre||'')} —
-          <em>${escapeHtml(e.procedimiento||'(sin procedimiento)')}</em>
-          ${e.lateralidad?` (${escapeHtml(e.lateralidad)})`:''}
-        </div>`;
-      }).join('');
-      const masPacientes = total > 5 ? `<div class="muted" style="font-size:.8rem;margin-top:4px">+ ${total-5} más…</div>` : '';
+      // Conteo de quirófanos
+      const { grupos: gprev, quirofanos: qprev } = agruparPorQuirofano(prg);
+      const conQuirofano = qprev.filter(q => q).length;
+      const sinQuirofano = (gprev[''] || []).length;
+
+      // Lista compacta de los pacientes (agrupada por quirófano)
+      const lineas = [];
+      qprev.forEach(q => {
+        gprev[q].forEach(e => {
+          const p = State.data.patients.find(x => x.id === e.pacienteId);
+          if (!p) return;
+          const opTag = e.operado === true ? '<span class="tag green" style="font-size:.7rem">✓ Op</span>'
+                      : e.operado === false ? '<span class="tag red" style="font-size:.7rem">✗ No op</span>'
+                      : '';
+          const qBadge = q ? `<span class="tag blue" style="font-size:.7rem">Q${escapeHtml(q)}#${e.orden||1}</span>` : '';
+          lineas.push(`<div style="margin-top:4px;font-size:.85rem">
+            ${opTag} ${qBadge} <strong>${escapeHtml(p.cama||'?')}</strong> ${escapeHtml(p.nombre||'')} —
+            <em>${escapeHtml(e.procedimiento||'(sin procedimiento)')}</em>
+            ${e.lateralidad?` (${escapeHtml(e.lateralidad)})`:''}
+          </div>`);
+        });
+      });
+      const previewPacientes = lineas.slice(0,5).join('');
+      const masPacientes = lineas.length > 5 ? `<div class="muted" style="font-size:.8rem;margin-top:4px">+ ${lineas.length-5} más…</div>` : '';
+      const resumenQ = (conQuirofano > 0 ? `${conQuirofano} quirófano(s)` : '') +
+                       (sinQuirofano > 0 ? (conQuirofano>0?', ':'') + `${sinQuirofano} sin asignar` : '');
 
       return `
         <div class="${cls}" onclick="App.abrirPrograma('${prg.id}')">
@@ -1451,7 +1488,7 @@ service cloud.firestore {
                 ${estadoTag}
               </div>
               <div class="pc-meta">
-                ${total} cirugía(s) ·
+                ${total} cirugía(s) ${resumenQ?'· '+resumenQ:''} ·
                 ${operados>0?`${operados} operado(s) · `:''}
                 ${noOperados>0?`${noOperados} no operado(s) · `:''}
                 ${pendientesRev>0?`${pendientesRev} sin revisar`:''}
@@ -1516,38 +1553,50 @@ service cloud.firestore {
       </div>
     `;
 
-    // Tabla para impresión
-    html += `<div class="card print-only">
-      <table>
-        <thead><tr>
-          <th>#</th><th>Cama</th><th>Paciente</th><th>Cédula</th><th>Edad</th>
-          <th>Diagnóstico</th><th>Procedimiento</th><th>Lat.</th>
-          <th>Sangre</th><th>Insumos</th><th>Cirujano</th><th>Anestesia</th><th>Obs.</th>
-        </tr></thead>
-        <tbody>
-          ${prg.pacientes.map((e,i) => {
-            const p = State.data.patients.find(x => x.id === e.pacienteId) || {};
-            return `<tr>
-              <td>${i+1}</td>
-              <td><strong>${escapeHtml(p.cama||'—')}</strong></td>
-              <td>${escapeHtml(p.nombre||'')}</td>
-              <td>${escapeHtml(p.cedula||'')}</td>
-              <td>${escapeHtml(p.edad||'')}</td>
-              <td>${escapeHtml((p.diagnosticos||[]).join('; '))}</td>
-              <td>${escapeHtml(e.procedimiento||'')}</td>
-              <td>${escapeHtml(e.lateralidad||'')}</td>
-              <td>${escapeHtml(e.requerimientoSangre||'—')}</td>
-              <td>${escapeHtml(e.insumos||'—')}</td>
-              <td>${escapeHtml(e.medicoCargo||p.cirujano||'—')}</td>
-              <td>${escapeHtml(e.anestesia||'—')}</td>
-              <td>${escapeHtml(e.observaciones||'')}</td>
-            </tr>`;
-          }).join('')}
-        </tbody>
-      </table>
+    // Agrupar por quirófano
+    const { grupos, quirofanos } = agruparPorQuirofano(prg);
+
+    // Tabla para impresión: una sección por quirófano
+    html += `<div class="print-only">
+      ${quirofanos.map(q => {
+        const ents = grupos[q];
+        return `
+          <h3 style="margin-top:12px;margin-bottom:6px">
+            ${q ? 'Quirófano ' + escapeHtml(q) : 'Sin quirófano asignado'}
+            (${ents.length} cirugía${ents.length!==1?'s':''})
+          </h3>
+          <table>
+            <thead><tr>
+              <th>Orden</th><th>Cama</th><th>Paciente</th><th>Cédula</th><th>Edad</th>
+              <th>Diagnóstico</th><th>Procedimiento</th><th>Lat.</th>
+              <th>Sangre</th><th>Insumos</th><th>Cirujano</th><th>Anestesia</th><th>Obs.</th>
+            </tr></thead>
+            <tbody>
+              ${ents.map((e,i) => {
+                const p = State.data.patients.find(x => x.id === e.pacienteId) || {};
+                return `<tr>
+                  <td><strong>${i+1}</strong></td>
+                  <td><strong>${escapeHtml(p.cama||'—')}</strong></td>
+                  <td>${escapeHtml(p.nombre||'')}</td>
+                  <td>${escapeHtml(p.cedula||'')}</td>
+                  <td>${escapeHtml(p.edad||'')}</td>
+                  <td>${escapeHtml((p.diagnosticos||[]).join('; '))}</td>
+                  <td>${escapeHtml(e.procedimiento||'')}</td>
+                  <td>${escapeHtml(e.lateralidad||'')}</td>
+                  <td>${escapeHtml(e.requerimientoSangre||'—')}</td>
+                  <td>${escapeHtml(e.insumos||'—')}</td>
+                  <td>${escapeHtml(e.medicoCargo||p.cirujano||'—')}</td>
+                  <td>${escapeHtml(e.anestesia||'—')}</td>
+                  <td>${escapeHtml(e.observaciones||'')}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        `;
+      }).join('')}
     </div>`;
 
-    // Tarjetas interactivas
+    // Tarjetas interactivas: agrupadas por quirófano
     if (total === 0) {
       html += `<div class="empty no-print">
         <div class="ico">🩺</div>
@@ -1555,13 +1604,28 @@ service cloud.firestore {
         <div style="margin-top:10px"><button class="btn" onclick="App.agregarAPrograma('${prg.id}')">+ Agregar paciente</button></div>
       </div>`;
     } else {
-      html += `<div class="no-print">${prg.pacientes.map((e,i) => this.renderEntradaPrograma(prg, e, i)).join('')}</div>`;
+      html += `<div class="no-print">${quirofanos.map(q => {
+        const ents = grupos[q];
+        return `
+          <div class="card" style="border-left:4px solid #3282b8">
+            <div class="row-between" style="margin-bottom:8px">
+              <h3 style="margin:0">
+                ${q ? '🏥 Quirófano ' + escapeHtml(q) : '⚠ Sin quirófano asignado'}
+                <span class="muted" style="font-weight:400;font-size:.85rem">
+                  · ${ents.length} cirugía${ents.length!==1?'s':''}
+                </span>
+              </h3>
+            </div>
+            ${ents.map((e, i) => this.renderEntradaPrograma(prg, e, i, ents.length)).join('')}
+          </div>
+        `;
+      }).join('')}</div>`;
     }
 
     return html;
   },
 
-  renderEntradaPrograma(prg, e, idx) {
+  renderEntradaPrograma(prg, e, idx, totalEnQuirofano) {
     const p = State.data.patients.find(x => x.id === e.pacienteId);
     if (!p) {
       return `<div class="card compact"><em class="muted">Paciente eliminado · </em><button class="btn ghost small" onclick="App.quitarDePrograma('${prg.id}','${e.id}')">Quitar entrada</button></div>`;
@@ -1576,19 +1640,44 @@ service cloud.firestore {
     const sangreOpts = ['','No requiere','Tipo y RH','Tipo y cruce','1 unidad GRE','2 unidades GRE','3 unidades GRE','4 unidades GRE','Reservar GRE + plasma','Otro'];
     const anestesiaOpts = ['','General','Raquídea','Epidural','Bloqueo regional','Local + sedación','Combinada'];
 
+    const ordenDisplay = e.orden ? e.orden : (idx+1);
+    const puedeSubir = idx > 0;
+    const puedeBajar = idx < (totalEnQuirofano - 1);
+
     return `
       <div class="${cls}" style="cursor:default">
         <div class="pc-row">
           <div class="pc-bed">${escapeHtml(p.cama||'?')}</div>
           <div class="pc-info">
             <div class="pc-name">
-              ${idx+1}. ${escapeHtml(p.nombre||'(sin nombre)')}
+              <span class="tag blue">#${ordenDisplay}</span>
+              ${escapeHtml(p.nombre||'(sin nombre)')}
               ${estadoTag}
               <button class="btn ghost small" style="float:right" onclick="App.openPaciente('${p.id}')">Ver ficha</button>
             </div>
             <div class="pc-meta">
               ${escapeHtml(p.cedula||'—')} · ${escapeHtml(p.edad||'?')} años · Dx: ${escapeHtml((p.diagnosticos||[]).join(', ')||'—')}
               ${p.alergias?` · <span class="tag red" style="font-size:.7rem">Alergia: ${escapeHtml(p.alergias)}</span>`:''}
+            </div>
+
+            <!-- Quirófano y orden dentro del quirófano -->
+            <div class="field-row" style="margin-top:10px">
+              <div class="field" style="margin-bottom:0">
+                <label>Quirófano</label>
+                <input value="${escapeHtml(e.quirofano||'')}" placeholder="Ej. 15"
+                  onchange="App.setEntradaQuirofano('${prg.id}','${e.id}',this.value)">
+              </div>
+              <div class="field" style="margin-bottom:0">
+                <label>Orden en quirófano (paciente ${ordenDisplay} de ${totalEnQuirofano})</label>
+                <div class="row-gap">
+                  <button class="btn ghost small" ${!puedeSubir?'disabled style="opacity:.4"':''}
+                    onclick="App.moverEnQuirofano('${prg.id}','${e.id}',-1)" title="Subir">↑ Subir</button>
+                  <button class="btn ghost small" ${!puedeBajar?'disabled style="opacity:.4"':''}
+                    onclick="App.moverEnQuirofano('${prg.id}','${e.id}',1)" title="Bajar">↓ Bajar</button>
+                  <input type="number" min="1" value="${ordenDisplay}" style="width:60px"
+                    onchange="App.setEntradaOrden('${prg.id}','${e.id}',this.value)" title="Asignar orden manualmente">
+                </div>
+              </div>
             </div>
 
             <div class="field" style="margin-top:8px;margin-bottom:8px">
@@ -1792,6 +1881,71 @@ service cloud.firestore {
     State.save();
   },
 
+  // Asigna un quirófano a una entrada y la coloca al final del orden de ese quirófano.
+  // Renumera el quirófano viejo para que quede consistente.
+  setEntradaQuirofano(programaId, entradaId, nuevoQuirofano) {
+    const prg = State.data.programas.find(p => p.id === programaId);
+    if (!prg) return;
+    const e = prg.pacientes.find(x => x.id === entradaId);
+    if (!e) return;
+    const quirofanoViejo = e.quirofano || '';
+    nuevoQuirofano = (nuevoQuirofano||'').trim();
+    if (quirofanoViejo === nuevoQuirofano) return;
+    e.quirofano = nuevoQuirofano;
+    // Asignar orden al final del nuevo quirófano
+    const otrosNuevo = prg.pacientes.filter(x => (x.quirofano||'') === nuevoQuirofano && x.id !== e.id);
+    e.orden = otrosNuevo.length + 1;
+    // Renumerar el quirófano viejo
+    this._renumerarQuirofano(prg, quirofanoViejo);
+    // Renumerar el nuevo (por si el orden quedó con huecos)
+    this._renumerarQuirofano(prg, nuevoQuirofano);
+    State.save();
+    this.render();
+  },
+
+  setEntradaOrden(programaId, entradaId, nuevoOrden) {
+    const prg = State.data.programas.find(p => p.id === programaId);
+    if (!prg) return;
+    const e = prg.pacientes.find(x => x.id === entradaId);
+    if (!e) return;
+    nuevoOrden = parseInt(nuevoOrden, 10);
+    if (!nuevoOrden || nuevoOrden < 1) return;
+    const ents = prg.pacientes.filter(x => (x.quirofano||'') === (e.quirofano||''))
+      .sort((a,b) => (a.orden||999) - (b.orden||999));
+    const idxActual = ents.findIndex(x => x.id === e.id);
+    const idxNuevo = Math.min(Math.max(0, nuevoOrden-1), ents.length-1);
+    if (idxActual === idxNuevo) return;
+    // Mover en el array y renumerar
+    ents.splice(idxActual, 1);
+    ents.splice(idxNuevo, 0, e);
+    ents.forEach((x, i) => { x.orden = i+1; });
+    State.save();
+    this.render();
+  },
+
+  moverEnQuirofano(programaId, entradaId, direccion) {  // -1 = subir, +1 = bajar
+    const prg = State.data.programas.find(p => p.id === programaId);
+    if (!prg) return;
+    const e = prg.pacientes.find(x => x.id === entradaId);
+    if (!e) return;
+    const ents = prg.pacientes.filter(x => (x.quirofano||'') === (e.quirofano||''))
+      .sort((a,b) => (a.orden||999) - (b.orden||999));
+    const idx = ents.findIndex(x => x.id === e.id);
+    const nuevoIdx = idx + direccion;
+    if (nuevoIdx < 0 || nuevoIdx >= ents.length) return;
+    // Swap
+    [ents[idx], ents[nuevoIdx]] = [ents[nuevoIdx], ents[idx]];
+    ents.forEach((x, i) => { x.orden = i+1; });
+    State.save();
+    this.render();
+  },
+
+  _renumerarQuirofano(prg, q) {
+    const ents = prg.pacientes.filter(x => (x.quirofano||'') === (q||''))
+      .sort((a,b) => (a.orden||999) - (b.orden||999));
+    ents.forEach((x, i) => { x.orden = i+1; });
+  },
+
   quitarDePrograma(programaId, entradaId) {
     if (!confirm('¿Quitar este paciente del programa?')) return;
     const prg = State.data.programas.find(p => p.id === programaId);
@@ -1837,7 +1991,10 @@ service cloud.firestore {
     if (!p) return `<div class="card compact muted">Paciente eliminado.</div>`;
     return `
       <div class="card compact" style="margin-bottom:10px">
-        <div class="strong">${escapeHtml(p.nombre||'(sin nombre)')} · Cama ${escapeHtml(p.cama||'?')}</div>
+        <div class="strong">
+          ${e.quirofano?`<span class="tag blue">Q${escapeHtml(e.quirofano)}#${e.orden||1}</span> `:''}
+          ${escapeHtml(p.nombre||'(sin nombre)')} · Cama ${escapeHtml(p.cama||'?')}
+        </div>
         <div class="muted" style="font-size:.85rem">${escapeHtml(e.procedimiento||'(sin procedimiento)')}${e.lateralidad?' ('+escapeHtml(e.lateralidad)+')':''}</div>
         <div class="row-gap" style="margin-top:8px">
           <button class="btn ${e.operado===true?'success':'ghost'} small" onclick="App.marcarRevision('${prg.id}','${e.id}',true)">Sí, operado</button>
