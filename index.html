@@ -398,7 +398,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v1.9-salidas-egresos-2026-05-08';
+const APP_VERSION = 'v2.2-conteo-cirugias-2026-05-08';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -482,6 +482,8 @@ function nuevoPaciente() {
     laboratorios: [],   // {id, fecha, valores:{Hb,Hct,Leu,Plt,Cr,BUN,Glu,Na,K,Ca,PCR,VES,...}, nota}
     interconsultas: [], // {id,fechaSolicitud,servicio,motivo,respondida,fechaRespuesta,respuesta}
     controlInfeccion: [], // {fecha,rxRepetido,examenesRepetidos,nota}
+    cirugiasRealizadas: [],   // historial completo de cirugías
+    requiereOtraCirugia: false, // true = el paciente vuelve a "listos" para una nueva cirugía
     programaQx: {
       programado: false,
       fechaProgramada: '',     // ISO date
@@ -511,7 +513,7 @@ function getProgramaQx(p) {
   return p.programaQx;
 }
 
-// Cirugía realizada del paciente (para post-op tracking)
+// Cirugía realizada del paciente (para post-op tracking — legacy: apunta a la más reciente)
 function getCirugia(p) {
   if (!p.cirugia) {
     p.cirugia = {
@@ -520,6 +522,46 @@ function getCirugia(p) {
     };
   }
   return p.cirugia;
+}
+
+// Lista de cirugías realizadas del paciente
+function getCirugiasRealizadas(p) {
+  if (!p.cirugiasRealizadas) p.cirugiasRealizadas = [];
+  return p.cirugiasRealizadas;
+}
+
+// La cirugía más reciente
+function ultimaCirugia(p) {
+  const lista = getCirugiasRealizadas(p);
+  if (lista.length === 0) {
+    // Compat con datos viejos que sólo tenían p.cirugia
+    if (p.cirugia && p.cirugia.realizada && p.cirugia.fecha) return p.cirugia;
+    return null;
+  }
+  return lista.slice().sort((a,b) => (b.fecha||'').localeCompare(a.fecha||''))[0];
+}
+
+function tieneCirugias(p) {
+  return getCirugiasRealizadas(p).length > 0
+    || (p.cirugia && p.cirugia.realizada);
+}
+
+// Sincroniza p.cirugia (legacy) con la última cirugía registrada
+function sincronizarCirugiaLegacy(p) {
+  const ult = ultimaCirugia(p);
+  if (ult) {
+    p.cirugia = {
+      realizada: true,
+      fecha: ult.fecha || '',
+      procedimiento: ult.procedimiento || '',
+      lateralidad: ult.lateralidad || '',
+      cirujano: ult.cirujano || '',
+      programaId: ult.programaId || '',
+      notas: ult.notas || ''
+    };
+  } else {
+    p.cirugia = { realizada:false, fecha:'', procedimiento:'', lateralidad:'', cirujano:'', programaId:'', notas:'' };
+  }
 }
 
 function nuevoPrograma(fecha) {
@@ -583,12 +625,12 @@ const fmtDateLong = (iso) => {
   return d.toLocaleDateString('es', { weekday:'long', day:'numeric', month:'long', year:'numeric' });
 };
 
-// Días postoperatorios. Si tiene fecha de egreso y la cirugía fue antes, cuenta hasta egreso.
+// Días postoperatorios desde la última cirugía. Si tiene fecha de egreso, cuenta hasta esa.
 function diasPostop(p) {
-  const c = p.cirugia;
-  if (!c || !c.realizada || !c.fecha) return null;
-  const fin = (p.fechaEgreso && p.fechaEgreso >= c.fecha) ? p.fechaEgreso : null;
-  return daysBetween(c.fecha, fin);
+  const ult = ultimaCirugia(p);
+  if (!ult || !ult.fecha) return null;
+  const fin = (p.fechaEgreso && p.fechaEgreso >= ult.fecha) ? p.fechaEgreso : null;
+  return daysBetween(ult.fecha, fin);
 }
 
 /* ---------- Egresos / reportes de salida ---------- */
@@ -613,21 +655,17 @@ function nuevoEgreso(pacienteId) {
 }
 
 function getCirugiasDelPaciente(pacienteId) {
-  const lista = [];
-  (State.data.programas || []).forEach(prg => {
-    (prg.pacientes || []).forEach(e => {
-      if (e.pacienteId === pacienteId && e.operado === true) {
-        lista.push({
-          fecha: prg.fecha,
-          procedimiento: e.procedimiento || '',
-          lateralidad: e.lateralidad || '',
-          cirujano: e.medicoCargo || '',
-          quirofano: e.quirofano || '',
-          notas: e.observaciones || ''
-        });
-      }
-    });
-  });
+  const p = (State.data.patients || []).find(x => x.id === pacienteId);
+  if (!p) return [];
+  // Fuente principal: array cirugiasRealizadas del paciente
+  const lista = (p.cirugiasRealizadas || []).map(c => ({
+    fecha: c.fecha || '',
+    procedimiento: c.procedimiento || '',
+    lateralidad: c.lateralidad || '',
+    cirujano: c.cirujano || '',
+    quirofano: c.quirofano || '',
+    notas: c.notas || ''
+  }));
   lista.sort((a,b) => (a.fecha||'').localeCompare(b.fecha||''));
   return lista;
 }
@@ -829,6 +867,21 @@ const State = {
   _migrar() {
     const data = this.data;
     data.patients.forEach(p => {
+      // Migrar cirugía única legacy → array cirugiasRealizadas
+      if (!p.cirugiasRealizadas) p.cirugiasRealizadas = [];
+      if (p.cirugia && p.cirugia.realizada && p.cirugia.fecha && p.cirugiasRealizadas.length === 0) {
+        p.cirugiasRealizadas.push({
+          fecha: p.cirugia.fecha,
+          procedimiento: p.cirugia.procedimiento || '',
+          lateralidad: p.cirugia.lateralidad || '',
+          cirujano: p.cirugia.cirujano || '',
+          programaId: p.cirugia.programaId || '',
+          quirofano: '',
+          notas: p.cirugia.notas || ''
+        });
+      }
+      if (p.requiereOtraCirugia === undefined) p.requiereOtraCirugia = false;
+
       if (p.programaQx && p.programaQx.programado && !p._migratedToPrograma) {
         const fecha = p.programaQx.fechaProgramada || todayISO();
         let prog = data.programas.find(pg => pg.fecha === fecha);
@@ -889,9 +942,10 @@ function tieneContraindicacion(p) {
  * Devuelve { listo: bool, motivo: string, faltantes: [strings] }
  */
 function evaluarAptoCirugia(p) {
-  // Si ya fue operado, ya no es candidato
-  if (p.cirugia && p.cirugia.realizada) {
-    return { listo:false, operado:true, motivo:'Ya operado el ' + fmtDate(p.cirugia.fecha), faltantes:[] };
+  // Si ya fue operado y NO tiene marcado "requiere otra cirugía", no es candidato
+  const ult = ultimaCirugia(p);
+  if (ult && !p.requiereOtraCirugia) {
+    return { listo:false, operado:true, motivo:'Ya operado el ' + fmtDate(ult.fecha), faltantes:[] };
   }
   const edad = parseInt(p.edad, 10);
   const faltantes = [];
@@ -1326,20 +1380,30 @@ service cloud.firestore {
     const alertas = calcularAlertasPaciente(p);
     const tieneRoja = alertas.some(a=>a.tipo==='red');
     const tieneAmarilla = alertas.some(a=>a.tipo==='yellow');
-    const operado = p.cirugia && p.cirugia.realizada;
+    const cirugiasArr = getCirugiasRealizadas(p);
+    const ult = ultimaCirugia(p);
+    const operado = !!ult;
     const dpostop = diasPostop(p);
+    const requiereOtra = !!p.requiereOtraCirugia;
     let cls = 'patient-card';
-    if (operado && !tieneRoja) cls += ' ready';
-    else if (apto.listo && !tieneRoja) cls += ' ready';
+    if ((operado || apto.listo) && !tieneRoja) cls += ' ready';
     if (tieneRoja) cls += ' alert';
-    else if (tieneAmarilla) cls += ' warn';
+    else if (tieneAmarilla || requiereOtra) cls += ' warn';
     if (p.fechaEgreso) cls += ' muted';
 
     const dxList = (p.diagnosticos || []).join(', ');
+    let estadoTag = '';
+    if (operado && requiereOtra) {
+      estadoTag = `<span class="tag green">Operado · día ${dpostop} postop</span> <span class="tag yellow">Pendiente otra cirugía</span>`;
+    } else if (operado) {
+      estadoTag = `<span class="tag green">Operado · día ${dpostop} postop${cirugiasArr.length>1?` (${cirugiasArr.length} cirugías)`:''}</span>`;
+    } else if (apto.listo) {
+      estadoTag = '<span class="tag green">Listo cirugía</span>';
+    } else {
+      estadoTag = '<span class="tag red">Pendiente</span>';
+    }
     const tagsHtml = [
-      operado ? `<span class="tag green">Operado · día ${dpostop} postop</span>` :
-        (apto.listo ? '<span class="tag green">Listo cirugía</span>' :
-          '<span class="tag red">Pendiente</span>'),
+      estadoTag,
       tieneInfeccion(p) ? '<span class="tag yellow">Infección</span>' : '',
       p.fechaEgreso ? '<span class="tag gray">Egresado</span>' : ''
     ].filter(Boolean).join(' ');
@@ -1358,9 +1422,10 @@ service cloud.firestore {
               <strong>Dx:</strong> ${escapeHtml(dxList || '—')}
             </div>
             ${operado?`<div class="pc-meta" style="margin-top:4px;color:#065f46">
-              <strong>Cirugía:</strong> ${escapeHtml(p.cirugia.procedimiento||'—')}
-              ${p.cirugia.lateralidad?' ('+escapeHtml(p.cirugia.lateralidad)+')':''}
-              · ${fmtDate(p.cirugia.fecha)} · ${dpostop} día(s) postop
+              <strong>Última cirugía:</strong> ${escapeHtml(ult.procedimiento||'—')}
+              ${ult.lateralidad?' ('+escapeHtml(ult.lateralidad)+')':''}
+              · ${fmtDate(ult.fecha)} · ${dpostop} día(s) postop
+              ${cirugiasArr.length>1?` · ${cirugiasArr.length} cirugías totales`:''}
             </div>`:''}
             <div class="pc-tags">${tagsHtml}</div>
             ${alertas.filter(a=>a.tipo==='red').slice(0,1).map(a=>`
@@ -2090,29 +2155,54 @@ service cloud.firestore {
     const p = this._findP(e.pacienteId);
     if (p) {
       if (operado) {
-        const c = getCirugia(p);
-        c.realizada = true;
-        c.fecha = prg.fecha;
-        c.procedimiento = e.procedimiento || '';
-        c.lateralidad = e.lateralidad || '';
-        c.cirujano = e.medicoCargo || p.cirujano || '';
-        c.programaId = prg.id;
-        c.notas = e.observaciones || '';
-        logCambio(p, 'Cirugía', `Operado el ${prg.fecha} — ${e.procedimiento}${e.lateralidad?' ('+e.lateralidad+')':''}`);
-      } else {
-        // Si previamente había sido marcado operado y ahora se cambia, revertir
-        if (p.cirugia && p.cirugia.realizada && p.cirugia.programaId === prg.id) {
-          p.cirugia.realizada = false;
-          p.cirugia.fecha = '';
-          p.cirugia.programaId = '';
-          logCambio(p, 'Cirugía', 'Marcado como NO operado en revisión');
+        // Agregar a cirugiasRealizadas (o actualizar si ya existe para este programa)
+        if (!p.cirugiasRealizadas) p.cirugiasRealizadas = [];
+        const datos = {
+          fecha: prg.fecha,
+          procedimiento: e.procedimiento || '',
+          lateralidad: e.lateralidad || '',
+          cirujano: e.medicoCargo || p.cirujano || '',
+          programaId: prg.id,
+          quirofano: e.quirofano || '',
+          notas: e.observaciones || ''
+        };
+        const idxExistente = p.cirugiasRealizadas.findIndex(c => c.programaId === prg.id);
+        if (idxExistente >= 0) {
+          p.cirugiasRealizadas[idxExistente] = datos;
         } else {
-          logCambio(p, 'Programa Qx', `No operado en programa del ${prg.fecha}`);
+          p.cirugiasRealizadas.push(datos);
         }
+        // Sincronizar legacy
+        sincronizarCirugiaLegacy(p);
+        // Si tenía marcado "Requiere otra cirugía", preguntar si todavía la necesita
+        if (p.requiereOtraCirugia) {
+          const totalCir = (p.cirugiasRealizadas || []).length;
+          const sigueNecesitando = confirm(
+            `${p.nombre || 'El paciente'} ya fue operado.\n` +
+            `Lleva ${totalCir} cirugía(s) durante esta hospitalización.\n\n` +
+            `¿Todavía requiere otra cirugía adicional?\n` +
+            `(Útil en fracturas expuestas, lavados seriados por infección, cirugías por etapas, etc.)\n\n` +
+            `Aceptar = Sí, mantener marcado "Requiere otra cirugía"\n` +
+            `Cancelar = No, ya está completo, desmarcar la casilla`
+          );
+          p.requiereOtraCirugia = sigueNecesitando;
+          logCambio(p, 'Cirugía',
+            `Operado el ${prg.fecha} (cirugía #${totalCir}) — ${e.procedimiento}${e.lateralidad?' ('+e.lateralidad+')':''}` +
+            (sigueNecesitando ? ' · Aún requiere otra cirugía' : ' · Casilla "requiere otra" desmarcada'));
+        } else {
+          const totalCir = (p.cirugiasRealizadas || []).length;
+          logCambio(p, 'Cirugía', `Operado el ${prg.fecha} (cirugía #${totalCir}) — ${e.procedimiento}${e.lateralidad?' ('+e.lateralidad+')':''}`);
+        }
+      } else {
+        // Quitar la cirugía de este programa si estaba registrada
+        if (p.cirugiasRealizadas) {
+          p.cirugiasRealizadas = p.cirugiasRealizadas.filter(c => c.programaId !== prg.id);
+        }
+        sincronizarCirugiaLegacy(p);
+        logCambio(p, 'Cirugía', `No operado en programa del ${prg.fecha}`);
       }
     }
     State.save();
-    // Re-render del modal de revisión
     document.getElementById('revBody').innerHTML =
       prg.pacientes.map(en => this.renderEntradaRevision(prg, en)).join('');
   },
@@ -3005,65 +3095,97 @@ service cloud.firestore {
 
   /* -------- Programa Quirúrgico (sub-pestaña en la ficha) -------- */
   tabPrograma(p) {
-    const c = getCirugia(p);
-    // Buscar en qué programas aparece este paciente
+    const cirugias = getCirugiasRealizadas(p).slice().sort((a,b) => (b.fecha||'').localeCompare(a.fecha||''));
+    const ult = ultimaCirugia(p);
+    const dpost = diasPostop(p);
     const enProgramas = (State.data.programas || [])
       .filter(prg => prg.pacientes.some(e => e.pacienteId === p.id))
       .sort((a,b) => (b.fecha||'').localeCompare(a.fecha||''));
 
     let html = '';
 
-    // Si fue operado, mostrar info post-op
-    if (c.realizada) {
-      const dpost = diasPostop(p);
-      html += `
-        <div class="alert-box green">
-          <strong>✓ Paciente operado.</strong><br>
-          ${escapeHtml(c.procedimiento||'—')} ${c.lateralidad?' ('+escapeHtml(c.lateralidad)+')':''}<br>
-          Fecha de cirugía: ${fmtDate(c.fecha)} · <strong>${dpost} día(s) postoperatorio</strong>
-          ${c.cirujano?` · Cirujano: ${escapeHtml(c.cirujano)}`:''}
-        </div>
+    if (ult) {
+      // Encabezado: estado actual
+      if (p.requiereOtraCirugia) {
+        html += `<div class="alert-box yellow">
+          <strong>⚠ Pendiente otra cirugía.</strong> El paciente fue operado el ${fmtDate(ult.fecha)} (${dpost} día(s) postop) y se marcó que requiere una nueva cirugía.<br>
+          Ya aparece en la lista <em>Listos para cirugía</em> y se puede agregar a un programa.
+        </div>`;
+      } else {
+        html += `<div class="alert-box green">
+          <strong>✓ Paciente operado.</strong> ${cirugias.length>1?`${cirugias.length} cirugías realizadas. `:''}
+          Última: ${escapeHtml(ult.procedimiento||'—')}${ult.lateralidad?' ('+escapeHtml(ult.lateralidad)+')':''}
+          el ${fmtDate(ult.fecha)} · <strong>${dpost} día(s) postoperatorio</strong>.
+        </div>`;
+      }
 
-        <div class="card">
-          <h3>Datos de la cirugía realizada</h3>
-          <div class="field-row">
-            <div class="field" style="margin-bottom:0">
-              <label>Fecha</label>
-              <input type="date" value="${escapeHtml(c.fecha)}" onchange="App.setCirugia('${p.id}','fecha',this.value)">
-            </div>
-            <div class="field" style="margin-bottom:0">
-              <label>Cirujano</label>
-              <input value="${escapeHtml(c.cirujano||'')}" oninput="App.setCirugia('${p.id}','cirujano',this.value)">
-            </div>
-          </div>
-          <div class="field" style="margin-top:8px">
-            <label>Procedimiento</label>
-            <textarea rows="2" oninput="App.setCirugia('${p.id}','procedimiento',this.value)">${escapeHtml(c.procedimiento||'')}</textarea>
-          </div>
-          <div class="field-row">
-            <div class="field" style="margin-bottom:0">
-              <label>Lateralidad</label>
-              <input value="${escapeHtml(c.lateralidad||'')}" oninput="App.setCirugia('${p.id}','lateralidad',this.value)">
-            </div>
-          </div>
-          <div class="field" style="margin-top:8px;margin-bottom:0">
-            <label>Notas de cirugía</label>
-            <textarea rows="2" oninput="App.setCirugia('${p.id}','notas',this.value)">${escapeHtml(c.notas||'')}</textarea>
-          </div>
-          <div style="margin-top:10px;text-align:right">
-            <button class="btn ghost small" onclick="App.deshacerCirugia('${p.id}')">Marcar como no operado</button>
-          </div>
+      // Toggle "Requiere otra cirugía"
+      html += `<div class="card">
+        <div class="checkbox-row">
+          <input type="checkbox" id="reqotra-${p.id}" ${p.requiereOtraCirugia?'checked':''}
+            onchange="App.toggleRequiereOtraCirugia('${p.id}',this.checked)">
+          <label for="reqotra-${p.id}"><strong>Requiere otra cirugía</strong></label>
         </div>
-      `;
+        <div class="muted" style="font-size:.85rem;margin-top:4px">
+          Marca esta casilla cuando el paciente, ya operado, vaya a necesitar otra intervención (lavado quirúrgico, etapa siguiente, complicación, etc.). Mientras esté marcada, el paciente aparecerá en la lista <em>Listos para cirugía</em> si cumple los estudios preoperatorios. Al confirmar la nueva cirugía en la revisión del programa, la app te preguntará si aún requiere otra cirugía adicional antes de desmarcarla.
+        </div>
+      </div>`;
+
+      // Historial de cirugías realizadas
+      html += `<div class="card">
+        <div class="row-between">
+          <h3 style="margin:0">Historial de cirugías</h3>
+          <button class="btn ghost small" onclick="App.agregarCirugiaManual('${p.id}')">+ Agregar manual</button>
+        </div>
+        ${cirugias.map((c, idx) => `
+          <div class="card compact" style="margin-top:10px">
+            <div class="row-between">
+              <strong>${cirugias.length-idx}. ${fmtDate(c.fecha)}</strong>
+              ${c.programaId?'<span class="tag blue" style="font-size:.7rem">Del programa</span>':'<span class="tag gray" style="font-size:.7rem">Manual</span>'}
+            </div>
+            <div class="field-row" style="margin-top:8px">
+              <div class="field" style="margin-bottom:0">
+                <label>Fecha</label>
+                <input type="date" value="${escapeHtml(c.fecha||'')}" onchange="App.setCirugiaIdx('${p.id}',${idx},'fecha',this.value)">
+              </div>
+              <div class="field" style="margin-bottom:0">
+                <label>Cirujano</label>
+                <input value="${escapeHtml(c.cirujano||'')}" oninput="App.setCirugiaIdx('${p.id}',${idx},'cirujano',this.value)">
+              </div>
+            </div>
+            <div class="field" style="margin-top:8px">
+              <label>Procedimiento</label>
+              <textarea rows="2" oninput="App.setCirugiaIdx('${p.id}',${idx},'procedimiento',this.value)">${escapeHtml(c.procedimiento||'')}</textarea>
+            </div>
+            <div class="field-row">
+              <div class="field" style="margin-bottom:0">
+                <label>Lateralidad</label>
+                <input value="${escapeHtml(c.lateralidad||'')}" oninput="App.setCirugiaIdx('${p.id}',${idx},'lateralidad',this.value)">
+              </div>
+              <div class="field" style="margin-bottom:0">
+                <label>Quirófano</label>
+                <input value="${escapeHtml(c.quirofano||'')}" oninput="App.setCirugiaIdx('${p.id}',${idx},'quirofano',this.value)">
+              </div>
+            </div>
+            <div class="field" style="margin-top:8px;margin-bottom:0">
+              <label>Notas / hallazgos</label>
+              <textarea rows="2" oninput="App.setCirugiaIdx('${p.id}',${idx},'notas',this.value)">${escapeHtml(c.notas||'')}</textarea>
+            </div>
+            <div style="text-align:right;margin-top:8px">
+              <button class="btn ghost small" onclick="App.eliminarCirugiaIdx('${p.id}',${idx})">Eliminar esta cirugía</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>`;
     } else {
-      // No operado todavía — mostrar estado del preop
+      // No operado — estado preop
       const apto = evaluarAptoCirugia(p);
       html += apto.listo
         ? `<div class="alert-box green">Paciente <strong>listo para cirugía</strong>. Puedes agregarlo al programa quirúrgico desde la pestaña <em>Programa Qx</em>.</div>`
         : `<div class="alert-box yellow"><strong>Pendiente de preoperatorio.</strong> ${escapeHtml(apto.motivo)}${apto.faltantes&&apto.faltantes.length?': '+escapeHtml(apto.faltantes.join(', ')):''}</div>`;
     }
 
-    // Historial de programas
+    // Historial de aparición en programas (planeación)
     if (enProgramas.length > 0) {
       html += `<div class="card">
         <h3>Aparece en programas</h3>
@@ -3082,13 +3204,14 @@ service cloud.firestore {
                 <div class="muted" style="font-size:.85rem">→</div>
               </div>
               <div class="muted" style="font-size:.85rem;margin-top:4px">
+                ${e.quirofano?`Q${escapeHtml(e.quirofano)}#${e.orden||1} · `:''}
                 ${escapeHtml(e.procedimiento||'(sin procedimiento)')}${e.lateralidad?' ('+escapeHtml(e.lateralidad)+')':''}
               </div>
             </div>
           `;
         }).join('')}
       </div>`;
-    } else if (!c.realizada) {
+    } else if (!ult) {
       html += `<div class="card muted" style="text-align:center">
         Este paciente no está en ningún programa quirúrgico.<br>
         <button class="btn small" style="margin-top:8px" onclick="App.closeModal();App.switchTab('programa')">Ir a Programa Qx</button>
@@ -3098,18 +3221,54 @@ service cloud.firestore {
     return html;
   },
 
-  setCirugia(id, campo, val) {
+  toggleRequiereOtraCirugia(id, val) {
     const p = this._findP(id); if (!p) return;
-    const c = getCirugia(p);
-    c[campo] = val;
+    p.requiereOtraCirugia = !!val;
+    logCambio(p, 'Cirugía', val ? 'Marcado: requiere otra cirugía' : 'Desmarcado: ya no requiere otra cirugía');
+    State.save();
+    this.renderModal(id);
+  },
+
+  setCirugiaIdx(id, idx, campo, val) {
+    const p = this._findP(id); if (!p) return;
+    const lista = getCirugiasRealizadas(p);
+    // ordenar por fecha desc para indexar
+    const ordenadas = lista.slice().sort((a,b) => (b.fecha||'').localeCompare(a.fecha||''));
+    const target = ordenadas[idx];
+    if (!target) return;
+    target[campo] = val;
+    sincronizarCirugiaLegacy(p);
     State.save();
   },
 
-  deshacerCirugia(id) {
-    if (!confirm('¿Marcar al paciente como NO operado? Esto lo regresa al estado pre-cirugía.')) return;
+  eliminarCirugiaIdx(id, idx) {
+    if (!confirm('¿Eliminar esta cirugía del historial? Esto NO afecta el programa quirúrgico de origen, sólo el registro en la ficha del paciente.')) return;
     const p = this._findP(id); if (!p) return;
-    p.cirugia = { realizada:false, fecha:'', procedimiento:'', lateralidad:'', cirujano:'', programaId:'', notas:'' };
-    logCambio(p, 'Cirugía', 'Revertido — marcado como no operado');
+    const lista = getCirugiasRealizadas(p);
+    const ordenadas = lista.slice().sort((a,b) => (b.fecha||'').localeCompare(a.fecha||''));
+    const target = ordenadas[idx];
+    if (!target) return;
+    p.cirugiasRealizadas = lista.filter(c => c !== target);
+    sincronizarCirugiaLegacy(p);
+    logCambio(p, 'Cirugía', `Eliminada del historial: ${target.fecha} ${target.procedimiento||''}`);
+    State.save();
+    this.renderModal(id);
+  },
+
+  agregarCirugiaManual(id) {
+    const p = this._findP(id); if (!p) return;
+    if (!p.cirugiasRealizadas) p.cirugiasRealizadas = [];
+    p.cirugiasRealizadas.push({
+      fecha: todayISO(),
+      procedimiento: '',
+      lateralidad: '',
+      cirujano: p.cirujano || '',
+      programaId: '',
+      quirofano: '',
+      notas: ''
+    });
+    sincronizarCirugiaLegacy(p);
+    logCambio(p, 'Cirugía', 'Agregada manualmente al historial');
     State.save();
     this.renderModal(id);
   },
