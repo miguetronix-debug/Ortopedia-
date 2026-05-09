@@ -365,6 +365,9 @@
       <div class="appbar-sub">Servicio de Ortopedia · <span id="appVersionLabel"></span></div>
     </div>
     <div class="row-gap no-print">
+      <span class="sync-status local" id="userBadge" title="Usuario actual de este dispositivo" onclick="App.openIdentificarse()" style="cursor:pointer">
+        <span style="font-size:.9em">👤</span><span id="userText">Sin identificar</span>
+      </span>
       <span class="sync-status local" id="syncStatus" title="Estado de sincronización" onclick="App.openSetup()">
         <span class="dot"></span><span id="syncText">Sin nube</span>
       </span>
@@ -398,10 +401,13 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v2.4-fix-selector-reop-2026-05-08';
+const APP_VERSION = 'v3.0-fase1-seguridad-2026-05-08';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
+const CURRENT_USER_KEY = 'ortopedia_user_v1';   // nombre de quien usa este dispositivo
+const LAST_EXPORT_KEY = 'ortopedia_last_export_v1';
+const DEBOUNCE_MS = 1500;  // milisegundos para evitar doble click en botones críticos
 
 // Configuración de Firebase embebida — todos los dispositivos que abran esta URL
 // se conectan automáticamente al mismo proyecto, sin necesidad de configurar nada.
@@ -694,6 +700,91 @@ function getInterconsultasRespondidas(p) {
     .sort((a,b) => (b.fechaRespuesta||'').localeCompare(a.fechaRespuesta||''));
 }
 
+/* ---------- Usuario actual del dispositivo ---------- */
+function getCurrentUser() {
+  return localStorage.getItem(CURRENT_USER_KEY) || '';
+}
+function setCurrentUser(nombre) {
+  if (nombre) localStorage.setItem(CURRENT_USER_KEY, nombre);
+  else localStorage.removeItem(CURRENT_USER_KEY);
+}
+
+/* ---------- Configuración del hospital y catálogo de usuarios ---------- */
+function getConfig() {
+  if (!State.data.config) {
+    State.data.config = {
+      hospitalNombre: '',
+      servicio: 'Ortopedia',
+      jefeServicio: '',
+      direccion: '',
+      telefono: '',
+      usuarios: []   // [{ nombre, rol }]
+    };
+  }
+  if (!State.data.config.usuarios) State.data.config.usuarios = [];
+  return State.data.config;
+}
+
+function listaUsuarios() {
+  return (getConfig().usuarios || []).slice().sort((a,b) =>
+    (a.nombre||'').localeCompare(b.nombre||'', 'es'));
+}
+
+function agregarUsuario(nombre, rol) {
+  nombre = (nombre||'').trim();
+  if (!nombre) return false;
+  const cfg = getConfig();
+  if (cfg.usuarios.some(u => u.nombre.toLowerCase() === nombre.toLowerCase())) return false;
+  cfg.usuarios.push({ nombre, rol: rol || 'residente' });
+  return true;
+}
+
+/* ---------- Validación de paciente ---------- */
+function validarPaciente(p, todos) {
+  const errores = [];
+  if (!p.nombre || !p.nombre.trim()) errores.push('Falta el nombre');
+  if (!p.cedula || !p.cedula.trim()) errores.push('Falta la cédula');
+  // Cédula duplicada (excluye al mismo paciente)
+  if (p.cedula && p.cedula.trim()) {
+    const cedNorm = p.cedula.trim().toLowerCase();
+    const dup = (todos || State.data.patients || []).find(o =>
+      o.id !== p.id && o.cedula && o.cedula.trim().toLowerCase() === cedNorm);
+    if (dup) errores.push(`Cédula duplicada con: ${dup.nombre || '(sin nombre)'} (cama ${dup.cama || '?'})`);
+  }
+  // Edad razonable
+  if (p.edad !== '' && p.edad != null) {
+    const e = parseInt(p.edad, 10);
+    if (isNaN(e) || e < 0 || e > 130) errores.push(`Edad fuera de rango (${p.edad})`);
+  }
+  return errores;
+}
+
+/* ---------- Última exportación ---------- */
+function getLastExportDate() {
+  const v = localStorage.getItem(LAST_EXPORT_KEY);
+  return v || '';
+}
+function setLastExportNow() {
+  localStorage.setItem(LAST_EXPORT_KEY, new Date().toISOString());
+}
+function diasDesdeUltimoExport() {
+  const v = getLastExportDate();
+  if (!v) return Infinity;
+  return daysBetween(v.slice(0,10));
+}
+
+/* ---------- Debounce para botones críticos ---------- */
+const _debounceLocks = new Set();
+function debounceAction(key, fn) {
+  if (_debounceLocks.has(key)) return false;
+  _debounceLocks.add(key);
+  try { fn(); }
+  finally {
+    setTimeout(() => _debounceLocks.delete(key), DEBOUNCE_MS);
+  }
+  return true;
+}
+
 /* ---------- Sincronización en la nube (Firebase Firestore) ---------- */
 const Sync = {
   app: null,
@@ -778,9 +869,9 @@ const Sync = {
           const remote = snap.exists ? snap.data() : null;
           if (remote && remote.patients) {
             const localStr = JSON.stringify(State.data);
-            const remoteStr = JSON.stringify({ patients: remote.patients, programas: remote.programas || [], egresos: remote.egresos || [], lastWrite: remote.lastWrite });
+            const remoteStr = JSON.stringify({ patients: remote.patients, programas: remote.programas || [], egresos: remote.egresos || [], config: remote.config || State.data.config, lastWrite: remote.lastWrite });
             if (localStr !== remoteStr) {
-              State.data = { patients: remote.patients, programas: remote.programas || [], egresos: remote.egresos || [], lastWrite: remote.lastWrite };
+              State.data = { patients: remote.patients, programas: remote.programas || [], egresos: remote.egresos || [], config: remote.config || State.data.config, lastWrite: remote.lastWrite };
               State._migrar();
               try { localStorage.setItem(STORAGE_KEY, JSON.stringify(State.data)); } catch(e){}
               if (App.render) App.render();
@@ -829,15 +920,28 @@ const Sync = {
         patients: State.data.patients || [],
         programas: State.data.programas || [],
         egresos: State.data.egresos || [],
+        config: State.data.config || {},
         lastWrite: Date.now()
       };
       State.data.lastWrite = payload.lastWrite;
       await ref.set(payload);
+      this.setStatus('online');
     } catch(e) {
       console.error('Error guardando en la nube:', e);
       this.ignoreNextRemote = false;
-      if (!navigator.onLine) this.setStatus('offline');
-      else this.setStatus('error', 'Error al guardar');
+      if (!navigator.onLine) {
+        this.setStatus('offline');
+      } else {
+        this.setStatus('error', 'Error al guardar');
+        // Mostrar aviso visible (una sola vez por sesión para no spamear)
+        if (!this._errorShownThisSession) {
+          this._errorShownThisSession = true;
+          alert('No se pudo guardar el último cambio en la nube.\n\n' +
+            'Detalle: ' + (e.message || e.code || 'desconocido') + '\n\n' +
+            'Tus cambios sí están guardados localmente. Cuando se restablezca la conexión o se corrija el error, sincronizarán automáticamente.\n\n' +
+            'Si esto ocurre seguido, exporta un respaldo desde el botón "Exportar".');
+        }
+      }
     }
   },
 
@@ -861,6 +965,13 @@ const State = {
     if (!this.data.patients) this.data.patients = [];
     if (!this.data.programas) this.data.programas = [];
     if (!this.data.egresos) this.data.egresos = [];
+    if (!this.data.config) {
+      this.data.config = {
+        hospitalNombre: '', servicio: 'Ortopedia', jefeServicio: '',
+        direccion: '', telefono: '', usuarios: []
+      };
+    }
+    if (!this.data.config.usuarios) this.data.config.usuarios = [];
     this._migrar();
   },
   // Migrar datos antiguos al nuevo formato
@@ -942,6 +1053,10 @@ function tieneContraindicacion(p) {
  * Devuelve { listo: bool, motivo: string, faltantes: [strings] }
  */
 function evaluarAptoCirugia(p) {
+  // Datos básicos del paciente: sin nombre o cédula no se programa nada
+  if (!p.nombre || !p.nombre.trim() || !p.cedula || !p.cedula.trim()) {
+    return { listo:false, motivo:'Faltan datos básicos del paciente (nombre o cédula)', faltantes:['Datos básicos'] };
+  }
   // Si ya fue operado y NO tiene marcado "requiere otra cirugía", no es candidato
   const ult = ultimaCirugia(p);
   if (ult && !p.requiereOtraCirugia) {
@@ -1044,6 +1159,7 @@ function logCambio(p, accion, detalle='') {
   if (!p.historial) p.historial = [];
   p.historial.push({
     fecha: new Date().toISOString(),
+    usuario: getCurrentUser() || '(sin identificar)',
     accion,
     detalle
   });
@@ -1063,6 +1179,7 @@ const App = {
     if (v) v.textContent = APP_VERSION;
 
     State.load();
+    this._refreshUserBadge();
     this.switchTab('lista');
     this.refreshAlertCount();
     // Conectar automáticamente — la app trae configuración Firebase embebida
@@ -1071,6 +1188,177 @@ const App = {
     } else {
       Sync.setStatus('local');
     }
+    // Si no hay usuario identificado en este dispositivo, pedirlo
+    if (!getCurrentUser()) {
+      // Esperar 600ms para no chocar con el alert de sincronización
+      setTimeout(() => this.openIdentificarse(true), 600);
+    }
+  },
+
+  _refreshUserBadge() {
+    const u = getCurrentUser();
+    const txt = document.getElementById('userText');
+    if (txt) txt.textContent = u || 'Identificarme';
+    const badge = document.getElementById('userBadge');
+    if (badge) {
+      badge.classList.toggle('online', !!u);
+      badge.classList.toggle('local', !u);
+    }
+  },
+
+  /* ---------- Identificación de usuario (Fase 1) ---------- */
+  openIdentificarse(esBienvenida) {
+    const usuarios = listaUsuarios();
+    const actual = getCurrentUser();
+
+    const html = `
+      <div class="modal-backdrop" onclick="if(event.target===this) ${esBienvenida?'':'App.closeModal()'}">
+        <div class="modal" style="max-width:600px">
+          <div class="modal-head">
+            <div>
+              <div style="font-weight:600">${esBienvenida?'¡Hola! Identifícate':'Cambiar usuario de este dispositivo'}</div>
+              <div style="font-size:.8rem;opacity:.9">${actual?'Usuario actual: '+escapeHtml(actual):'Selecciona quién va a usar la app desde este dispositivo'}</div>
+            </div>
+            ${esBienvenida?'':'<button class="close-x" onclick="App.closeModal()">✕</button>'}
+          </div>
+          <div class="modal-body">
+            <div class="alert-box blue" style="font-size:.85rem">
+              Esta selección se guarda <strong>solo en este dispositivo</strong>. Cada cambio que hagas (crear paciente, modificar dx, marcar operado, etc.) quedará registrado a tu nombre en el historial. Puedes cambiarla cuando quieras desde el ícono 👤 arriba a la derecha.
+            </div>
+
+            ${usuarios.length > 0 ? `
+              <h3 style="margin-top:14px">Selecciona tu nombre de la lista</h3>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                ${usuarios.map(u => `
+                  <button class="btn ${u.nombre===actual?'success':'ghost'}" style="justify-content:flex-start"
+                    onclick="App.identificarComo('${escapeHtml(u.nombre).replace(/'/g,'&apos;')}')">
+                    👤 ${escapeHtml(u.nombre)} ${u.rol?'<span class=\"muted\" style=\"font-weight:400\">· '+escapeHtml(u.rol)+'</span>':''}
+                  </button>
+                `).join('')}
+              </div>
+            ` : `
+              <div class="alert-box yellow" style="font-size:.85rem;margin-top:14px">
+                Todavía no hay nadie registrado en el equipo. Agrega el primer usuario abajo (puede ser tu nombre).
+              </div>
+            `}
+
+            <hr>
+
+            <h3>Agregar a una persona nueva</h3>
+            <div class="field-row">
+              <div class="field" style="margin-bottom:0">
+                <label>Nombre</label>
+                <input id="nuevoUserNombre" placeholder="Ej. Dr. Juan Pérez">
+              </div>
+              <div class="field" style="margin-bottom:0">
+                <label>Rol</label>
+                <select id="nuevoUserRol">
+                  <option value="residente">Residente</option>
+                  <option value="interno">Interno</option>
+                  <option value="staff">Staff / Adjunto</option>
+                  <option value="jefe">Jefe de servicio</option>
+                  <option value="enfermería">Enfermería</option>
+                  <option value="otro">Otro</option>
+                </select>
+              </div>
+            </div>
+            <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn" onclick="App.agregarUsuarioNuevo(false)">+ Agregar persona</button>
+              <button class="btn success" onclick="App.agregarUsuarioNuevo(true)">+ Agregar y usar como yo</button>
+            </div>
+
+            ${usuarios.length > 0 ? `
+              <hr>
+              <h3>Administrar usuarios existentes</h3>
+              <div class="muted" style="font-size:.85rem;margin-bottom:8px">
+                Edita o elimina personas del equipo (esto NO borra el historial que ya hicieron).
+              </div>
+              ${usuarios.map((u, idx) => `
+                <div class="card compact" style="margin-bottom:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                  <input value="${escapeHtml(u.nombre)}" style="flex:1;min-width:140px"
+                    onchange="App.editarUsuario(${idx},'nombre',this.value)">
+                  <select onchange="App.editarUsuario(${idx},'rol',this.value)" style="width:auto">
+                    ${['residente','interno','staff','jefe','enfermería','otro'].map(r =>
+                      `<option value="${r}" ${u.rol===r?'selected':''}>${r}</option>`).join('')}
+                  </select>
+                  <button class="btn ghost small" onclick="App.eliminarUsuario(${idx})">Eliminar</button>
+                </div>
+              `).join('')}
+            ` : ''}
+          </div>
+          <div class="modal-foot">
+            ${actual?`<button class="btn ghost" onclick="App.cerrarSesionUsuario()">Cerrar sesión de "${escapeHtml(actual)}"</button>`:''}
+            <div style="flex:1"></div>
+            ${esBienvenida?'':'<button class="btn ghost" onclick="App.closeModal()">Cancelar</button>'}
+            ${esBienvenida && actual?'<button class="btn success" onclick="App.closeModal()">Listo</button>':''}
+          </div>
+        </div>
+      </div>
+    `;
+    document.getElementById('modalRoot').innerHTML = html;
+  },
+
+  identificarComo(nombre) {
+    setCurrentUser(nombre);
+    this._refreshUserBadge();
+    this.closeModal();
+  },
+
+  agregarUsuarioNuevo(usarComoYo) {
+    const nombreInp = document.getElementById('nuevoUserNombre');
+    const rolInp = document.getElementById('nuevoUserRol');
+    const nombre = (nombreInp.value || '').trim();
+    const rol = rolInp.value || 'residente';
+    if (!nombre) { alert('Escribe un nombre.'); return; }
+    if (!agregarUsuario(nombre, rol)) {
+      alert('Ya existe un usuario con ese nombre.');
+      return;
+    }
+    State.save();
+    if (usarComoYo) {
+      setCurrentUser(nombre);
+      this._refreshUserBadge();
+      this.closeModal();
+    } else {
+      this.openIdentificarse(false);  // refrescar
+    }
+  },
+
+  editarUsuario(idx, campo, valor) {
+    const usuarios = listaUsuarios();
+    const target = usuarios[idx];
+    if (!target) return;
+    const original = getConfig().usuarios.find(u => u.nombre === target.nombre);
+    if (!original) return;
+    const valorViejo = original.nombre;
+    original[campo] = valor;
+    // Si cambian nombre, mantener al usuario actual del dispositivo si era éste
+    if (campo === 'nombre' && getCurrentUser() === valorViejo) {
+      setCurrentUser(valor);
+      this._refreshUserBadge();
+    }
+    State.save();
+  },
+
+  eliminarUsuario(idx) {
+    const usuarios = listaUsuarios();
+    const target = usuarios[idx];
+    if (!target) return;
+    if (!confirm(`¿Eliminar a ${target.nombre} de la lista de usuarios? El historial que ya generó se conserva.`)) return;
+    getConfig().usuarios = getConfig().usuarios.filter(u => u.nombre !== target.nombre);
+    if (getCurrentUser() === target.nombre) {
+      setCurrentUser('');
+      this._refreshUserBadge();
+    }
+    State.save();
+    this.openIdentificarse(false);
+  },
+
+  cerrarSesionUsuario() {
+    setCurrentUser('');
+    this._refreshUserBadge();
+    this.closeModal();
+    setTimeout(() => this.openIdentificarse(true), 200);
   },
 
   /* ---------- Pantalla de configuración Firebase ---------- */
@@ -1106,6 +1394,45 @@ const App = {
               <div><strong>Firebase SDK:</strong> ${
                 typeof window.firebase !== 'undefined' ? '✓ Cargado' : '✗ No cargado'
               }</div>
+              <div><strong>Usuario actual:</strong> ${getCurrentUser() ? escapeHtml(getCurrentUser()) : 'sin identificar'}
+                · <a href="javascript:void(0)" onclick="App.closeModal();App.openIdentificarse()">cambiar</a></div>
+              <div><strong>Último respaldo:</strong> ${getLastExportDate() ? new Date(getLastExportDate()).toLocaleString('es') + ' (hace ' + diasDesdeUltimoExport() + ' día(s))' : 'nunca'}</div>
+            </div>
+
+            <div class="setup-step">
+              <h3>Datos del hospital y servicio</h3>
+              <p class="muted" style="font-size:.85rem">Aparecerán en los encabezados de las impresiones (pase de visita, programa quirúrgico, reportes de egreso).</p>
+              <div class="field-row">
+                <div class="field" style="margin-bottom:0">
+                  <label>Nombre del hospital</label>
+                  <input value="${escapeHtml((State.data.config||{}).hospitalNombre||'')}"
+                    oninput="App.setHospitalConfig('hospitalNombre',this.value)"
+                    placeholder="Ej. Hospital Santo Tomás">
+                </div>
+                <div class="field" style="margin-bottom:0">
+                  <label>Servicio</label>
+                  <input value="${escapeHtml((State.data.config||{}).servicio||'Ortopedia')}"
+                    oninput="App.setHospitalConfig('servicio',this.value)">
+                </div>
+              </div>
+              <div class="field-row" style="margin-top:8px">
+                <div class="field" style="margin-bottom:0">
+                  <label>Jefe de servicio</label>
+                  <input value="${escapeHtml((State.data.config||{}).jefeServicio||'')}"
+                    oninput="App.setHospitalConfig('jefeServicio',this.value)"
+                    placeholder="Dr. ...">
+                </div>
+                <div class="field" style="margin-bottom:0">
+                  <label>Teléfono</label>
+                  <input value="${escapeHtml((State.data.config||{}).telefono||'')}"
+                    oninput="App.setHospitalConfig('telefono',this.value)">
+                </div>
+              </div>
+              <div class="field" style="margin-top:8px;margin-bottom:0">
+                <label>Dirección / referencia</label>
+                <input value="${escapeHtml((State.data.config||{}).direccion||'')}"
+                  oninput="App.setHospitalConfig('direccion',this.value)">
+              </div>
             </div>
 
             <div class="setup-step">
@@ -1181,6 +1508,12 @@ service cloud.firestore {
       </div>
     `;
     document.getElementById('modalRoot').innerHTML = html;
+  },
+
+  setHospitalConfig(campo, valor) {
+    const cfg = getConfig();
+    cfg[campo] = valor;
+    State.save();
   },
 
   copyText(t) {
@@ -1299,10 +1632,21 @@ service cloud.firestore {
 
   /* ---------- Pase de visita / lista por cama ---------- */
   renderLista(incluirEgresados) {
+    const cfg = getConfig();
     const titulo = incluirEgresados ? 'Todos los pacientes' : 'Pase de visita (por cama)';
+    const hospName = cfg.hospitalNombre ? `${escapeHtml(cfg.hospitalNombre)} — ` : '';
+    const dEx = diasDesdeUltimoExport();
+    const banner = (dEx >= 7)
+      ? `<div class="alert-box yellow no-print" style="margin-bottom:12px">
+          <strong>⚠ Recordatorio de respaldo:</strong> ${dEx === Infinity ? 'todavía no has hecho ningún respaldo' : `hace ${dEx} día(s) que no exportas`}.
+          Te recomendamos exportar un respaldo periódicamente para no perder información.
+          <button class="btn small" style="margin-top:6px" onclick="App.exportData()">Exportar ahora</button>
+        </div>`
+      : '';
     return `
+      ${banner}
       <div class="print-only" id="printHeader">
-        <div class="print-title">Servicio de Ortopedia — ${titulo}</div>
+        <div class="print-title">${hospName}Servicio de ${escapeHtml(cfg.servicio||'Ortopedia')} — ${titulo}</div>
         <div class="print-sub" id="printSub"></div>
       </div>
 
@@ -1652,10 +1996,12 @@ service cloud.firestore {
     const esPasado = prg.fecha < todayISO();
     const necesitaRevision = esPasado && !prg.revisado && pendientesRev > 0;
 
+    const cfgH = getConfig();
+    const hospHeader = cfgH.hospitalNombre ? `${escapeHtml(cfgH.hospitalNombre)} · ` : '';
     let html = `
       <div class="print-only">
-        <div class="print-title">Programa Quirúrgico</div>
-        <div class="print-sub">${fmtDateLong(prg.fecha)} · Servicio de Ortopedia · ${total} cirugía(s)</div>
+        <div class="print-title">${hospHeader}Programa Quirúrgico</div>
+        <div class="print-sub">${fmtDateLong(prg.fecha)} · Servicio de ${escapeHtml(cfgH.servicio||'Ortopedia')} · ${total} cirugía(s)</div>
       </div>
 
       <div class="toolbar no-print">
@@ -1888,23 +2234,25 @@ service cloud.firestore {
   },
 
   crearPrograma() {
-    const fecha = prompt('Fecha del programa (YYYY-MM-DD):', todayISO());
-    if (!fecha) return;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
-      alert('Fecha inválida. Formato: YYYY-MM-DD (ej. 2026-05-12).');
-      return;
-    }
-    const existente = (State.data.programas || []).find(p => p.fecha === fecha);
-    if (existente) {
-      if (confirm(`Ya existe un programa para el ${fmtDateLong(fecha)}. ¿Quieres abrirlo?`)) {
-        this.abrirPrograma(existente.id);
+    debounceAction('crearPrograma', () => {
+      const fecha = prompt('Fecha del programa (YYYY-MM-DD):', todayISO());
+      if (!fecha) return;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+        alert('Fecha inválida. Formato: YYYY-MM-DD (ej. 2026-05-12).');
+        return;
       }
-      return;
-    }
-    const prg = nuevoPrograma(fecha);
-    State.data.programas.push(prg);
-    State.save();
-    this.abrirPrograma(prg.id);
+      const existente = (State.data.programas || []).find(p => p.fecha === fecha);
+      if (existente) {
+        if (confirm(`Ya existe un programa para el ${fmtDateLong(fecha)}. ¿Quieres abrirlo?`)) {
+          this.abrirPrograma(existente.id);
+        }
+        return;
+      }
+      const prg = nuevoPrograma(fecha);
+      State.data.programas.push(prg);
+      State.save();
+      this.abrirPrograma(prg.id);
+    });
   },
 
   eliminarPrograma(id) {
@@ -2295,6 +2643,7 @@ service cloud.firestore {
     }
 
     const diasHosp = daysBetween(p.fechaIngreso, eg.fechaEgreso);
+    const cfgH = getConfig();
     const especialidadesComunes = ['Ortopedia','Medicina Interna','Medicina Familiar','Geriatría','Cardiología','Endocrinología','Nefrología','Hematología','Infectología','Cirugía General','Neurocirugía','Vascular Periférico','Rehabilitación','Nutrición','Psiquiatría','Otra'];
     const lugaresHerida = ['Consulta externa','Centro de salud','Domicilio','Curaciones del hospital','Otro'];
 
@@ -2309,8 +2658,9 @@ service cloud.firestore {
 
       <!-- Encabezado para impresión -->
       <div class="print-only">
-        <div class="print-title">Reporte de Egreso — Servicio de Ortopedia</div>
-        <div class="print-sub">${new Date().toLocaleString('es')}</div>
+        ${cfgH.hospitalNombre?`<div class="print-sub" style="font-weight:700">${escapeHtml(cfgH.hospitalNombre)}</div>`:''}
+        <div class="print-title">Reporte de Egreso — Servicio de ${escapeHtml(cfgH.servicio||'Ortopedia')}</div>
+        <div class="print-sub">${cfgH.jefeServicio?'Jefe: '+escapeHtml(cfgH.jefeServicio)+' · ':''}${new Date().toLocaleString('es')}</div>
       </div>
 
       <!-- Datos del paciente (solo lectura) -->
@@ -2800,12 +3150,14 @@ service cloud.firestore {
   _modalSubtab: 'datos',
 
   openNew() {
-    const p = nuevoPaciente();
-    State.data.patients.push(p);
-    logCambio(p, 'Creación', 'Paciente creado');
-    State.save();
-    this._modalSubtab = 'datos';
-    this.openPaciente(p.id);
+    debounceAction('openNew', () => {
+      const p = nuevoPaciente();
+      State.data.patients.push(p);
+      logCambio(p, 'Creación', 'Paciente creado');
+      State.save();
+      this._modalSubtab = 'datos';
+      this.openPaciente(p.id);
+    });
   },
 
   openPaciente(id) {
@@ -2847,13 +3199,16 @@ service cloud.firestore {
     else if (this._modalSubtab === 'inf') bodyHtml = this.tabInf(p);
     else if (this._modalSubtab === 'hist') bodyHtml = this.tabHist(p);
 
-    const aptoBadge = apto.listo
-      ? `<span class="pill ready">✓ Listo cirugía</span>`
-      : apto.operado
-        ? (p.requiereOtraCirugia
-            ? `<span class="pill pending">Operado · pendiente otra cirugía</span>`
-            : `<span class="pill ready">✓ Operado</span>`)
-        : (tieneContraindicacion(p) ? `<span class="pill notready">No apto</span>` : `<span class="pill pending">Pendiente</span>`);
+    const erroresValidacion = validarPaciente(p);
+    const aptoBadge = (erroresValidacion.length > 0)
+      ? `<span class="pill notready">⚠ Datos incompletos</span>`
+      : apto.listo
+        ? `<span class="pill ready">✓ Listo cirugía</span>`
+        : apto.operado
+          ? (p.requiereOtraCirugia
+              ? `<span class="pill pending">Operado · pendiente otra cirugía</span>`
+              : `<span class="pill ready">✓ Operado</span>`)
+          : (tieneContraindicacion(p) ? `<span class="pill notready">No apto</span>` : `<span class="pill pending">Pendiente</span>`);
 
     const html = `
       <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
@@ -2891,16 +3246,26 @@ service cloud.firestore {
 
   /* -------- Datos básicos -------- */
   tabDatos(p) {
+    const errores = validarPaciente(p);
+    const errBox = errores.length > 0
+      ? `<div class="alert-box red"><strong>⚠ Datos incompletos:</strong><ul style="margin:6px 0 0 18px;padding:0">${errores.map(e=>`<li>${escapeHtml(e)}</li>`).join('')}</ul></div>`
+      : '';
+    const nombreInvalido = !p.nombre || !p.nombre.trim();
+    const cedulaInvalida = !p.cedula || !p.cedula.trim();
+    const cedulaDup = errores.some(e => e.startsWith('Cédula duplicada'));
     return `
+      ${errBox}
       <div class="card">
         <div class="field-row">
           <div class="field">
             <label>Nombre completo *</label>
-            <input value="${escapeHtml(p.nombre)}" oninput="App.actualizar('${p.id}','nombre',this.value)">
+            <input value="${escapeHtml(p.nombre)}" oninput="App.actualizar('${p.id}','nombre',this.value)"
+              style="${nombreInvalido?'border-color:#dc2626;background:#fef2f2':''}">
           </div>
           <div class="field">
-            <label>Cédula / ID</label>
-            <input value="${escapeHtml(p.cedula)}" oninput="App.actualizar('${p.id}','cedula',this.value)">
+            <label>Cédula / ID *</label>
+            <input value="${escapeHtml(p.cedula)}" oninput="App.actualizar('${p.id}','cedula',this.value)"
+              style="${(cedulaInvalida||cedulaDup)?'border-color:#dc2626;background:#fef2f2':''}">
           </div>
         </div>
         <div class="field-row">
@@ -3574,13 +3939,16 @@ service cloud.firestore {
     if (head) {
       const apto = evaluarAptoCirugia(p);
       const dias = daysBetween(p.fechaIngreso);
-      const aptoBadge = apto.listo
-        ? `<span class="pill ready">✓ Listo cirugía</span>`
-        : apto.operado
-          ? (p.requiereOtraCirugia
-              ? `<span class="pill pending">Operado · pendiente otra cirugía</span>`
-              : `<span class="pill ready">✓ Operado</span>`)
-          : (tieneContraindicacion(p) ? `<span class="pill notready">No apto</span>` : `<span class="pill pending">Pendiente</span>`);
+      const erroresValidacionH = validarPaciente(p);
+      const aptoBadge = (erroresValidacionH.length > 0)
+        ? `<span class="pill notready">⚠ Datos incompletos</span>`
+        : apto.listo
+          ? `<span class="pill ready">✓ Listo cirugía</span>`
+          : apto.operado
+            ? (p.requiereOtraCirugia
+                ? `<span class="pill pending">Operado · pendiente otra cirugía</span>`
+                : `<span class="pill ready">✓ Operado</span>`)
+            : (tieneContraindicacion(p) ? `<span class="pill notready">No apto</span>` : `<span class="pill pending">Pendiente</span>`);
       head.innerHTML = `
         <div>
           <div style="font-weight:600">${escapeHtml(p.nombre || '(Nuevo paciente)')}</div>
@@ -3786,6 +4154,9 @@ service cloud.firestore {
     a.download = `ortopedia_${todayISO()}.json`;
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
+    setLastExportNow();
+    // Refrescar para que desaparezca el banner si estaba visible
+    if (State.currentTab === 'lista' || State.currentTab === 'todos') this.render();
   },
 
   importData(ev) {
