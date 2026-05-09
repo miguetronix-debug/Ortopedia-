@@ -442,7 +442,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.2-fix-catalogos-modal-2026-05-09';
+const APP_VERSION = 'v3.4-fix-sync-catalogos-2026-05-09';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -1161,42 +1161,38 @@ const State = {
     if (!this.data.patients) this.data.patients = [];
     if (!this.data.programas) this.data.programas = [];
     if (!this.data.egresos) this.data.egresos = [];
-    if (!this.data.config) {
-      this.data.config = {
-        hospitalNombre: '', servicio: 'Ortopedia', jefeServicio: '',
-        direccion: '', telefono: '', usuarios: []
-      };
+    this._migrar();
+  },
+  // Migrar datos antiguos al nuevo formato y sembrar catálogos si faltan
+  _migrar() {
+    const data = this.data;
+
+    // Asegurar config y catálogos. Esto corre tanto al cargar como cuando
+    // llegan datos remotos, así que protege los catálogos de ser borrados
+    // por una sincronización con un dispositivo que tenga versión vieja.
+    if (!data.config) {
+      data.config = { hospitalNombre: '', servicio: 'Ortopedia', jefeServicio: '', direccion: '', telefono: '', usuarios: [] };
     }
-    if (!this.data.config.usuarios) this.data.config.usuarios = [];
-    // Inicializar catálogos vacíos si no existen
-    if (!this.data.config.catalogos) {
-      this.data.config.catalogos = {
-        diagnosticos: [],
-        procedimientos: [],
-        medicamentos: [],
-        esquemasEgreso: [],
-        cirujanos: []
-      };
-    }
-    const cats = this.data.config.catalogos;
+    if (!data.config.usuarios) data.config.usuarios = [];
+    if (!data.config.catalogos) data.config.catalogos = {};
+    const cats = data.config.catalogos;
     if (!cats.diagnosticos) cats.diagnosticos = [];
     if (!cats.procedimientos) cats.procedimientos = [];
     if (!cats.medicamentos) cats.medicamentos = [];
     if (!cats.esquemasEgreso) cats.esquemasEgreso = [];
     if (!cats.cirujanos) cats.cirujanos = [];
-    // Sembrar con valores por defecto si están vacíos (sólo primera vez)
-    if (cats.diagnosticos.length === 0) cats.diagnosticos = SEED_DIAGNOSTICOS.slice();
-    if (cats.procedimientos.length === 0) cats.procedimientos = SEED_PROCEDIMIENTOS.slice();
-    if (cats.medicamentos.length === 0) cats.medicamentos = SEED_MEDICAMENTOS.map(m => ({...m}));
-    if (cats.esquemasEgreso.length === 0) cats.esquemasEgreso = SEED_ESQUEMAS_EGRESO.map(e => ({...e}));
-    if (cats.cirujanos.length === 0) cats.cirujanos = SEED_CIRUJANOS.slice();
-    // Si jefe de servicio no está definido, lo seteamos por defecto
-    if (!this.data.config.jefeServicio) this.data.config.jefeServicio = 'Dr. Franklin Carrillo';
-    this._migrar();
-  },
-  // Migrar datos antiguos al nuevo formato
-  _migrar() {
-    const data = this.data;
+    // Sembrar con valores por defecto si nunca se sembraron en este servidor.
+    // El flag _seeded evita re-sembrar si el usuario borró ítems intencionalmente.
+    if (!data.config._seeded) {
+      if (cats.diagnosticos.length === 0) cats.diagnosticos = SEED_DIAGNOSTICOS.slice();
+      if (cats.procedimientos.length === 0) cats.procedimientos = SEED_PROCEDIMIENTOS.slice();
+      if (cats.medicamentos.length === 0) cats.medicamentos = SEED_MEDICAMENTOS.map(m => ({...m}));
+      if (cats.esquemasEgreso.length === 0) cats.esquemasEgreso = SEED_ESQUEMAS_EGRESO.map(e => ({...e}));
+      if (cats.cirujanos.length === 0) cats.cirujanos = SEED_CIRUJANOS.slice();
+      data.config._seeded = true;
+    }
+    if (!data.config.jefeServicio) data.config.jefeServicio = 'Dr. Franklin Carrillo';
+
     data.patients.forEach(p => {
       // Migrar cirugía única legacy → array cirugiasRealizadas
       if (!p.cirugiasRealizadas) p.cirugiasRealizadas = [];
@@ -3894,6 +3890,15 @@ service cloud.firestore {
   },
   _closeSecondary() {
     document.getElementById('modalRoot2').innerHTML = '';
+    // Si hay un modal de paciente abierto, refrescarlo para que se vean los cambios
+    // hechos en el catálogo (diagnósticos toggleados, etc.)
+    if (this._currentModalId) {
+      this.renderModal(this._currentModalId);
+    } else {
+      // Si no hay paciente abierto pero estamos en una vista que pudo cambiar
+      // (programa quirúrgico, egreso), re-renderizamos
+      this.render();
+    }
   },
 
   renderModal(id) {
