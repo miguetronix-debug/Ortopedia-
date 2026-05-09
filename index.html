@@ -315,6 +315,42 @@
     .pc-bed { width: 38px; height: 38px; font-size: .9rem; }
   }
 
+  /* ---------- Filter chips ---------- */
+  .filter-chips {
+    display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;
+  }
+  .chip {
+    background: white; border: 1px solid #cbd5e1;
+    color: #334155; padding: 6px 12px; border-radius: 999px;
+    font-size: .85rem; cursor: pointer; transition: all .12s;
+    white-space: nowrap;
+  }
+  .chip:hover { border-color: #3282b8; color: #0f4c75; }
+  .chip.active {
+    background: #0f4c75; color: white; border-color: #0f4c75;
+    font-weight: 500;
+  }
+  .chip .count {
+    display: inline-block; background: rgba(0,0,0,.08);
+    border-radius: 10px; padding: 1px 7px; margin-left: 4px;
+    font-size: .75rem; font-weight: 600;
+  }
+  .chip.active .count { background: rgba(255,255,255,.22); }
+
+  /* Catalog picker modal */
+  .catalog-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 6px; max-height: 50vh; overflow-y: auto;
+    padding: 4px;
+  }
+  .catalog-item {
+    padding: 8px 10px; background: #f1f5f9; border-radius: 6px;
+    cursor: pointer; font-size: .85rem;
+    transition: background .12s;
+  }
+  .catalog-item:hover { background: #cbd5e1; }
+  .catalog-item.selected { background: #d1fae5; border: 1px solid #059669; }
+
   /* ---------- Sync status ---------- */
   .sync-status {
     display: inline-flex; align-items: center; gap: 5px;
@@ -401,7 +437,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.0-fase1-seguridad-2026-05-08';
+const APP_VERSION = 'v3.1-fase2-catalogos-2026-05-09';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -425,6 +461,152 @@ const SPECIALIDADES_PREOP = [
   'Cardiología', 'Neumología', 'Endocrinología',
   'Nefrología', 'Hematología', 'Otra'
 ];
+/* ---------- Catálogos sembrados (sólo se usan al primer inicio o si vacíos) ---------- */
+const SEED_DIAGNOSTICOS = [
+  // Fracturas miembro inferior
+  'Fractura de cuello femoral', 'Fractura intertrocantérica', 'Fractura subtrocantérica',
+  'Fractura de diáfisis femoral', 'Fractura femoral distal', 'Fractura supracondílea de fémur',
+  'Fractura de meseta tibial', 'Fractura de diáfisis tibial', 'Fractura de pilón tibial',
+  'Fractura maleolar', 'Fractura bimaleolar', 'Fractura trimaleolar',
+  'Fractura de calcáneo', 'Fractura de astrágalo', 'Fractura de mediopié',
+  'Fractura de metatarsianos',
+  // Fracturas miembro superior
+  'Fractura de húmero proximal', 'Fractura de diáfisis humeral', 'Fractura de húmero distal',
+  'Fractura de radio distal', 'Fractura de Colles',
+  'Fractura de ambos huesos del antebrazo', 'Fractura de olecranon',
+  'Fractura de cúbito proximal', 'Fractura de escafoides',
+  'Fractura de metacarpianos', 'Fractura de falanges',
+  // Pelvis y otras
+  'Fractura de pelvis', 'Fractura de acetábulo', 'Fractura de clavícula',
+  'Fractura de escápula', 'Fracturas costales',
+  // Especiales
+  'Fractura expuesta', 'Pseudoartrosis', 'No unión de fractura',
+  'Extremidad severamente mutilada',
+  // Degenerativas
+  'Coxartrosis', 'Gonartrosis', 'Necrosis avascular de cabeza femoral',
+  // Infecciones
+  'Osteomielitis aguda', 'Osteomielitis crónica', 'Artritis séptica',
+  'Infección periprótesis (PJI)', 'Celulitis', 'Absceso de tejidos blandos',
+  // Otros
+  'Luxación de hombro', 'Luxación de cadera', 'Luxación de rodilla',
+  'Ruptura del tendón de Aquiles', 'Ruptura del manguito rotador',
+  'Ruptura del tendón cuadricipital', 'Lesión de LCA', 'Lesión de LCP',
+  'Lesión meniscal', 'Síndrome compartimental'
+];
+
+const SEED_PROCEDIMIENTOS = [
+  // Osteosíntesis
+  'RAFI con placa de bloqueo (LCP)', 'RAFI con clavo intramedular (CIM)',
+  'Clavo gamma', 'Clavo PFN', 'Fijador externo',
+  'Tornillos canulados', 'Cerclaje', 'Mini placas 2.7',
+  // Articulares
+  'Reemplazo total de cadera (RTC)', 'Reemplazo total de rodilla (RTR)',
+  'Hemiartroplastia de cadera', 'Recambio de prótesis (1 tiempo)',
+  'Recambio de prótesis (2 tiempos)', 'Reconstrucción articular',
+  // Infección
+  'Lavado quirúrgico articular', 'Debridación y lavado de tejidos blandos',
+  'Debridación de hueso', 'Espaciador de cemento',
+  // Trauma
+  'Reducción cerrada bajo anestesia', 'Reducción cerrada con yeso',
+  'Reducción cerrada con férula', 'Reparación tendinosa / tenorrafia',
+  'Fasciotomía',
+  // Otros
+  'Amputación de extremidad', 'Retiro de material de osteosíntesis',
+  'Injerto óseo', 'Colgajo de cobertura',
+  'Artroscopia diagnóstica', 'Artroscopia terapéutica'
+];
+
+const SEED_MEDICAMENTOS = [
+  // Analgesia
+  { nombre:'Acetaminofén', dosis:'1 g', via:'VO', frecuencia:'c/8 h', nota:'Analgesia base' },
+  { nombre:'Tramadol', dosis:'50 mg', via:'VO/IV', frecuencia:'c/8 h PRN dolor', nota:'Opioide débil' },
+  { nombre:'Ketorolaco', dosis:'30 mg', via:'IV', frecuencia:'c/8 h', nota:'Máximo 5 días' },
+  { nombre:'Diclofenaco', dosis:'50 mg', via:'VO', frecuencia:'c/12 h', nota:'Con protector gástrico' },
+  { nombre:'Ibuprofeno', dosis:'400 mg', via:'VO', frecuencia:'c/8 h', nota:'' },
+  // Profilaxis
+  { nombre:'Cefalotina (profilaxis qx)', dosis:'1-2 g', via:'IV', frecuencia:'preop + c/8 h × 24 h', nota:'Profilaxis estándar' },
+  { nombre:'Vancomicina (profilaxis MRSA)', dosis:'1 g', via:'IV', frecuencia:'c/12 h', nota:'Alergia a betalactámicos / riesgo MRSA' },
+  { nombre:'Clindamicina (alergia a penicilina)', dosis:'600 mg', via:'IV', frecuencia:'c/8 h', nota:'Alternativa profilaxis' },
+  { nombre:'Enoxaparina profiláctica', dosis:'40 mg', via:'SC', frecuencia:'c/24 h', nota:'Tromboprofilaxis' },
+  // Antibióticos para infección
+  { nombre:'Vancomicina (tratamiento)', dosis:'15-20 mg/kg', via:'IV', frecuencia:'c/12 h', nota:'Ajustar por niveles' },
+  { nombre:'Cefepime', dosis:'2 g', via:'IV', frecuencia:'c/12 h', nota:'Amplio espectro gram negativos' },
+  { nombre:'Piperacilina-tazobactam', dosis:'4.5 g', via:'IV', frecuencia:'c/8 h', nota:'Amplio espectro' },
+  { nombre:'Linezolid', dosis:'600 mg', via:'IV/VO', frecuencia:'c/12 h', nota:'MRSA' },
+  { nombre:'Daptomicina', dosis:'6-10 mg/kg', via:'IV', frecuencia:'c/24 h', nota:'MRSA' },
+  { nombre:'Cefalexina (egreso)', dosis:'500 mg', via:'VO', frecuencia:'c/6 h', nota:'Continuación oral' },
+  { nombre:'Amoxicilina-clavulánico (egreso)', dosis:'875/125 mg', via:'VO', frecuencia:'c/12 h', nota:'Egreso' },
+  { nombre:'Levofloxacino (egreso)', dosis:'500-750 mg', via:'VO', frecuencia:'c/24 h', nota:'Egreso' },
+  // Otros
+  { nombre:'Omeprazol', dosis:'20-40 mg', via:'VO', frecuencia:'c/24 h', nota:'Protector gástrico' },
+  { nombre:'Pantoprazol', dosis:'40 mg', via:'IV/VO', frecuencia:'c/24 h', nota:'Protector gástrico' },
+  { nombre:'Ondansetrón', dosis:'4-8 mg', via:'IV/VO', frecuencia:'c/8 h PRN', nota:'Antiemético' },
+  { nombre:'Metoclopramida', dosis:'10 mg', via:'IV/VO', frecuencia:'c/8 h PRN', nota:'Antiemético' },
+  { nombre:'Insulina cristalina (esquema)', dosis:'Según escala', via:'SC', frecuencia:'preprandial', nota:'Diabéticos' }
+];
+
+const SEED_ESQUEMAS_EGRESO = [
+  {
+    nombre: 'Postop cadera (RTC / hemi / pertrocantérica)',
+    contenido:
+      'Enoxaparina 40 mg SC c/24 h por 14-35 días (según procedimiento)\n' +
+      'Acetaminofén 1 g VO c/8 h\n' +
+      'Tramadol 50 mg VO c/8 h PRN dolor\n' +
+      'Curación de herida cada 3 días\n' +
+      'Retiro de puntos en 14 días\n' +
+      'Apoyo según procedimiento realizado'
+  },
+  {
+    nombre: 'Postop rodilla (RTR / artroscopia / RAFI meseta)',
+    contenido:
+      'Enoxaparina 40 mg SC c/24 h por 14 días\n' +
+      'Acetaminofén 1 g VO c/8 h\n' +
+      'Tramadol 50 mg VO c/8 h PRN\n' +
+      'Crioterapia (hielo) cada 2-3 h por 48-72 h\n' +
+      'Fisioterapia para rango de movimiento desde el día 1 postop\n' +
+      'Carga según procedimiento realizado'
+  },
+  {
+    nombre: 'Postop osteosíntesis con placa (sin apoyo)',
+    contenido:
+      'Acetaminofén 1 g VO c/8 h\n' +
+      'Diclofenaco 50 mg VO c/12 h por 5 días\n' +
+      'Tramadol 50 mg VO c/8 h PRN dolor\n' +
+      'Movilidad articular activa-asistida desde día 1 postop\n' +
+      'Sin apoyo del miembro intervenido hasta consolidación radiográfica\n' +
+      'Cita control con Rx en 2 semanas'
+  },
+  {
+    nombre: 'Postop osteosíntesis con clavo (apoyo progresivo)',
+    contenido:
+      'Acetaminofén 1 g VO c/8 h\n' +
+      'Diclofenaco 50 mg VO c/12 h por 5 días\n' +
+      'Tramadol 50 mg VO c/8 h PRN dolor\n' +
+      'Movilidad articular desde día 1 postop\n' +
+      'Apoyo progresivo según tolerancia al dolor\n' +
+      'Cita control con Rx en 2 semanas'
+  },
+  {
+    nombre: 'Postop infección osteoarticular',
+    contenido:
+      'Antibiótico oral según cultivo por 4-6 semanas (especificar)\n' +
+      'Curaciones específicas según indicación (VAC o convencional)\n' +
+      'Control de laboratorio: PCR y VES cada 2 semanas\n' +
+      'Evaluación por infectología ambulatoria\n' +
+      'Cita control en 2 semanas con Rx + laboratorios'
+  }
+];
+
+const SEED_CIRUJANOS = [
+  'Dr. Enrique Espinosa', 'Dra. Karla Vargas', 'Dr. Michael Kushner',
+  'Dr. José Luis Moreno', 'Dr. Rodrigo Espino', 'Dr. Ricardo Gutiérrez',
+  'Dr. José Elías Vergara', 'Dra. Rosa Mick', 'Dr. Bolívar Franco',
+  'Dr. René Chen Lee', 'Dr. Alejandro Arango', 'Dr. Danilo Martínez',
+  'Dr. Aníbal Morales', 'Dr. Marcos Ruíz', 'Dr. Rodrigo Correa',
+  'Dr. Franklin Carrillo', 'Dr. Ricardo Cabezas', 'Dr. Guillermo Pérez Silva',
+  'Dr. Nicolás Rodríguez', 'Dr. Franklin Badiola'
+];
+
 const SERVICIOS_INTERCONSULTA = [
   'Medicina Interna','Medicina Familiar','Geriatría','Cardiología','Neumología',
   'Endocrinología','Nefrología','Hematología','Infectología','Anestesiología',
@@ -773,6 +955,14 @@ function diasDesdeUltimoExport() {
   return daysBetween(v.slice(0,10));
 }
 
+/* ---------- Catálogos ---------- */
+function getCatalogo(nombre) {
+  const cfg = getConfig();
+  if (!cfg.catalogos) cfg.catalogos = {};
+  if (!cfg.catalogos[nombre]) cfg.catalogos[nombre] = [];
+  return cfg.catalogos[nombre];
+}
+
 /* ---------- Debounce para botones críticos ---------- */
 const _debounceLocks = new Set();
 function debounceAction(key, fn) {
@@ -957,6 +1147,7 @@ const State = {
   data: { patients: [] },
   currentTab: 'lista',
   search: '',
+  filterType: 'todos',  // todos | listos | postop | infeccion | hoy | sinprog | misPacientes
   load() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -972,6 +1163,30 @@ const State = {
       };
     }
     if (!this.data.config.usuarios) this.data.config.usuarios = [];
+    // Inicializar catálogos vacíos si no existen
+    if (!this.data.config.catalogos) {
+      this.data.config.catalogos = {
+        diagnosticos: [],
+        procedimientos: [],
+        medicamentos: [],
+        esquemasEgreso: [],
+        cirujanos: []
+      };
+    }
+    const cats = this.data.config.catalogos;
+    if (!cats.diagnosticos) cats.diagnosticos = [];
+    if (!cats.procedimientos) cats.procedimientos = [];
+    if (!cats.medicamentos) cats.medicamentos = [];
+    if (!cats.esquemasEgreso) cats.esquemasEgreso = [];
+    if (!cats.cirujanos) cats.cirujanos = [];
+    // Sembrar con valores por defecto si están vacíos (sólo primera vez)
+    if (cats.diagnosticos.length === 0) cats.diagnosticos = SEED_DIAGNOSTICOS.slice();
+    if (cats.procedimientos.length === 0) cats.procedimientos = SEED_PROCEDIMIENTOS.slice();
+    if (cats.medicamentos.length === 0) cats.medicamentos = SEED_MEDICAMENTOS.map(m => ({...m}));
+    if (cats.esquemasEgreso.length === 0) cats.esquemasEgreso = SEED_ESQUEMAS_EGRESO.map(e => ({...e}));
+    if (cats.cirujanos.length === 0) cats.cirujanos = SEED_CIRUJANOS.slice();
+    // Si jefe de servicio no está definido, lo seteamos por defecto
+    if (!this.data.config.jefeServicio) this.data.config.jefeServicio = 'Dr. Franklin Carrillo';
     this._migrar();
   },
   // Migrar datos antiguos al nuevo formato
@@ -1436,6 +1651,18 @@ const App = {
             </div>
 
             <div class="setup-step">
+              <h3>Catálogos del servicio</h3>
+              <p class="muted" style="font-size:.85rem">Listas de diagnósticos, procedimientos, medicamentos, esquemas de egreso y cirujanos. Aparecen como sugerencias / plantillas al llenar pacientes y programas. Puedes agregar y quitar items.</p>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
+                <button class="btn ghost small" onclick="App.openCatalogoAdmin('diagnosticos')">📋 Diagnósticos (${getCatalogo('diagnosticos').length})</button>
+                <button class="btn ghost small" onclick="App.openCatalogoAdmin('procedimientos')">🔪 Procedimientos (${getCatalogo('procedimientos').length})</button>
+                <button class="btn ghost small" onclick="App.openCatalogoAdmin('medicamentos')">💊 Medicamentos (${getCatalogo('medicamentos').length})</button>
+                <button class="btn ghost small" onclick="App.openCatalogoAdmin('esquemasEgreso')">📝 Esquemas egreso (${getCatalogo('esquemasEgreso').length})</button>
+                <button class="btn ghost small" onclick="App.openCatalogoAdmin('cirujanos')">👨‍⚕️ Cirujanos (${getCatalogo('cirujanos').length})</button>
+              </div>
+            </div>
+
+            <div class="setup-step">
               <h3>1. Crea un proyecto Firebase (gratis, una sola vez)</h3>
               <ol style="padding-left:20px;line-height:1.6">
                 <li>Entra a <a href="https://console.firebase.google.com/" target="_blank">console.firebase.google.com</a> con tu Gmail.</li>
@@ -1514,6 +1741,399 @@ service cloud.firestore {
     const cfg = getConfig();
     cfg[campo] = valor;
     State.save();
+  },
+
+  /* ---------- Pickers de catálogo ---------- */
+  // Picker de diagnósticos: agrega los seleccionados al paciente
+  openCatalogoPicker(catalogo, pacienteId) {
+    const items = getCatalogo(catalogo).slice().sort((a,b) => a.localeCompare(b, 'es'));
+    const p = this._findP(pacienteId);
+    const existentes = new Set((p && p.diagnosticos) ? p.diagnosticos : []);
+    const titulo = catalogo === 'diagnosticos' ? 'Agregar diagnóstico desde catálogo' : 'Agregar desde catálogo';
+    const html = `
+      <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
+        <div class="modal" style="max-width:680px">
+          <div class="modal-head">
+            <div>
+              <div style="font-weight:600">${titulo}</div>
+              <div style="font-size:.8rem;opacity:.9">Click en cada uno para agregar/quitar. Cierra cuando termines.</div>
+            </div>
+            <button class="close-x" onclick="App.closeModal()">✕</button>
+          </div>
+          <div class="modal-body">
+            <input type="search" placeholder="Buscar..." oninput="App._filtrarCatalogoPicker(this.value)" style="margin-bottom:10px">
+            <div class="catalog-grid" id="catalogPickerGrid">
+              ${items.map(it => `
+                <div class="catalog-item ${existentes.has(it)?'selected':''}"
+                  data-name="${escapeHtml(it).toLowerCase()}"
+                  onclick="App._toggleDxFromCatalog('${pacienteId}', this, '${escapeHtml(it).replace(/'/g, '&apos;')}')">
+                  ${escapeHtml(it)}
+                </div>
+              `).join('')}
+            </div>
+          </div>
+          <div class="modal-foot">
+            <div class="muted" style="font-size:.85rem">${items.length} ${catalogo} en el catálogo</div>
+            <div style="flex:1"></div>
+            <button class="btn ghost" onclick="App.closeModal()">Cerrar</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.getElementById('modalRoot').innerHTML = html;
+  },
+
+  _filtrarCatalogoPicker(q) {
+    const grid = document.getElementById('catalogPickerGrid');
+    if (!grid) return;
+    q = (q||'').toLowerCase();
+    Array.from(grid.children).forEach(child => {
+      const name = child.dataset.name || '';
+      child.style.display = (q === '' || name.includes(q)) ? '' : 'none';
+    });
+  },
+
+  _toggleDxFromCatalog(pacienteId, el, valor) {
+    const p = this._findP(pacienteId); if (!p) return;
+    if (!p.diagnosticos) p.diagnosticos = [];
+    valor = valor.replace(/&apos;/g, "'");
+    const idx = p.diagnosticos.indexOf(valor);
+    if (idx >= 0) {
+      p.diagnosticos.splice(idx, 1);
+      el.classList.remove('selected');
+    } else {
+      p.diagnosticos.push(valor);
+      el.classList.add('selected');
+    }
+    logCambio(p, 'Edición', `Dx ${idx>=0?'quitado':'agregado'}: ${valor}`);
+    State.save();
+  },
+
+  // Picker para entradas de programa (procedimiento)
+  openCatalogoPickerEntrada(catalogo, programaId, entradaId) {
+    const items = getCatalogo(catalogo).slice().sort((a,b) => a.localeCompare(b, 'es'));
+    const html = `
+      <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
+        <div class="modal" style="max-width:680px">
+          <div class="modal-head">
+            <div>
+              <div style="font-weight:600">Insertar procedimiento desde catálogo</div>
+              <div style="font-size:.8rem;opacity:.9">Click sobre uno para insertarlo.</div>
+            </div>
+            <button class="close-x" onclick="App.closeModal()">✕</button>
+          </div>
+          <div class="modal-body">
+            <input type="search" placeholder="Buscar..." oninput="App._filtrarCatalogoPicker(this.value)" style="margin-bottom:10px">
+            <div class="catalog-grid" id="catalogPickerGrid">
+              ${items.map(it => `
+                <div class="catalog-item"
+                  data-name="${escapeHtml(it).toLowerCase()}"
+                  onclick="App._aplicarProcEntrada('${programaId}','${entradaId}','${escapeHtml(it).replace(/'/g,'&apos;')}')">
+                  ${escapeHtml(it)}
+                </div>
+              `).join('')}
+            </div>
+          </div>
+          <div class="modal-foot">
+            <button class="btn ghost" onclick="App.closeModal()">Cerrar</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.getElementById('modalRoot').innerHTML = html;
+  },
+
+  _aplicarProcEntrada(programaId, entradaId, valor) {
+    valor = valor.replace(/&apos;/g, "'");
+    const prg = State.data.programas.find(p => p.id === programaId);
+    if (!prg) return;
+    const e = prg.pacientes.find(x => x.id === entradaId);
+    if (!e) return;
+    e.procedimiento = valor;
+    State.save();
+    this.closeModal();
+    this.render();
+  },
+
+  // Picker de plantillas de medicamentos para paciente
+  openMedTemplatePicker(pacienteId) {
+    const meds = getCatalogo('medicamentos');
+    const html = `
+      <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
+        <div class="modal" style="max-width:700px">
+          <div class="modal-head">
+            <div>
+              <div style="font-weight:600">Agregar medicamento desde plantilla</div>
+              <div style="font-size:.8rem;opacity:.9">Click sobre uno y se agrega al paciente con dosis preconfigurada.</div>
+            </div>
+            <button class="close-x" onclick="App.closeModal()">✕</button>
+          </div>
+          <div class="modal-body">
+            <input type="search" placeholder="Buscar..." oninput="App._filtrarCatalogoPicker(this.value)" style="margin-bottom:10px">
+            <div id="catalogPickerGrid" style="display:flex;flex-direction:column;gap:6px">
+              ${meds.map((m, idx) => `
+                <div class="catalog-item" data-name="${escapeHtml((m.nombre||'')+' '+(m.nota||'')).toLowerCase()}"
+                  onclick="App._aplicarMedPlantilla('${pacienteId}', ${idx})">
+                  <div><strong>${escapeHtml(m.nombre)}</strong>
+                    ${m.dosis?` · ${escapeHtml(m.dosis)}`:''}
+                    ${m.via?` · ${escapeHtml(m.via)}`:''}
+                    ${m.frecuencia?` · ${escapeHtml(m.frecuencia)}`:''}</div>
+                  ${m.nota?`<div class="muted" style="font-size:.78rem;margin-top:2px">${escapeHtml(m.nota)}</div>`:''}
+                </div>
+              `).join('')}
+            </div>
+          </div>
+          <div class="modal-foot">
+            <button class="btn ghost" onclick="App.closeModal()">Cerrar</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.getElementById('modalRoot').innerHTML = html;
+  },
+
+  _aplicarMedPlantilla(pacienteId, idxPlantilla) {
+    const p = this._findP(pacienteId); if (!p) return;
+    const plantilla = getCatalogo('medicamentos')[idxPlantilla];
+    if (!plantilla) return;
+    if (!p.medicamentos) p.medicamentos = [];
+    p.medicamentos.push({
+      id: 'm_'+uid(),
+      nombre: plantilla.nombre || '',
+      dosis: plantilla.dosis || '',
+      via: plantilla.via || '',
+      frecuencia: plantilla.frecuencia || '',
+      inicio: todayISO(),
+      fin: '',
+      activo: true,
+      nota: plantilla.nota || ''
+    });
+    logCambio(p, 'Medicamento', `Agregado desde plantilla: ${plantilla.nombre}`);
+    State.save();
+    this.closeModal();
+    this.renderModal(pacienteId);
+  },
+
+  // Picker de esquemas de egreso (inserta texto en una textarea)
+  openEsquemaPicker(egresoId, campo) {
+    const esquemas = getCatalogo('esquemasEgreso');
+    const html = `
+      <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
+        <div class="modal" style="max-width:700px">
+          <div class="modal-head">
+            <div>
+              <div style="font-weight:600">Insertar esquema de egreso</div>
+              <div style="font-size:.8rem;opacity:.9">Click sobre el esquema para agregarlo. Después puedes editar lo específico del paciente.</div>
+            </div>
+            <button class="close-x" onclick="App.closeModal()">✕</button>
+          </div>
+          <div class="modal-body">
+            ${esquemas.map((es, idx) => `
+              <div class="card compact" style="margin-bottom:8px;cursor:pointer"
+                onclick="App._aplicarEsquema('${egresoId}','${campo}',${idx})">
+                <strong>${escapeHtml(es.nombre)}</strong>
+                <pre style="white-space:pre-wrap;font-family:inherit;font-size:.85rem;margin:6px 0 0;color:#475569">${escapeHtml(es.contenido)}</pre>
+              </div>
+            `).join('')}
+            ${esquemas.length === 0 ? '<div class="empty">No hay esquemas en el catálogo. Puedes agregarlos desde el engrane → Catálogos.</div>' : ''}
+          </div>
+          <div class="modal-foot">
+            <button class="btn ghost" onclick="App.closeModal()">Cerrar</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.getElementById('modalRoot').innerHTML = html;
+  },
+
+  /* ---------- Administrador de catálogos ---------- */
+  openCatalogoAdmin(catalogo) {
+    const items = getCatalogo(catalogo);
+    const titulos = {
+      diagnosticos: 'Diagnósticos',
+      procedimientos: 'Procedimientos quirúrgicos',
+      medicamentos: 'Plantillas de medicamentos',
+      esquemasEgreso: 'Esquemas de egreso',
+      cirujanos: 'Cirujanos del servicio'
+    };
+    let bodyHtml = '';
+    if (catalogo === 'medicamentos') {
+      bodyHtml = items.map((m, idx) => `
+        <div class="card compact" style="margin-bottom:6px">
+          <div class="field-row">
+            <div class="field" style="margin-bottom:0">
+              <label>Nombre</label>
+              <input value="${escapeHtml(m.nombre||'')}" onchange="App.editarItemCatalogo('medicamentos',${idx},'nombre',this.value)">
+            </div>
+            <div class="field" style="margin-bottom:0">
+              <label>Dosis</label>
+              <input value="${escapeHtml(m.dosis||'')}" onchange="App.editarItemCatalogo('medicamentos',${idx},'dosis',this.value)">
+            </div>
+          </div>
+          <div class="field-row" style="margin-top:6px">
+            <div class="field" style="margin-bottom:0">
+              <label>Vía</label>
+              <input value="${escapeHtml(m.via||'')}" onchange="App.editarItemCatalogo('medicamentos',${idx},'via',this.value)">
+            </div>
+            <div class="field" style="margin-bottom:0">
+              <label>Frecuencia</label>
+              <input value="${escapeHtml(m.frecuencia||'')}" onchange="App.editarItemCatalogo('medicamentos',${idx},'frecuencia',this.value)">
+            </div>
+          </div>
+          <div class="field" style="margin-top:6px;margin-bottom:0">
+            <label>Nota</label>
+            <input value="${escapeHtml(m.nota||'')}" onchange="App.editarItemCatalogo('medicamentos',${idx},'nota',this.value)">
+          </div>
+          <div style="text-align:right;margin-top:6px">
+            <button class="btn ghost small" onclick="App.eliminarItemCatalogo('medicamentos',${idx})">Eliminar</button>
+          </div>
+        </div>
+      `).join('');
+      bodyHtml += `
+        <hr>
+        <h4>Agregar nuevo medicamento</h4>
+        <div class="field-row">
+          <div class="field"><label>Nombre</label><input id="newMedNombre"></div>
+          <div class="field"><label>Dosis</label><input id="newMedDosis"></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Vía</label><input id="newMedVia"></div>
+          <div class="field"><label>Frecuencia</label><input id="newMedFrec"></div>
+        </div>
+        <div class="field"><label>Nota</label><input id="newMedNota"></div>
+        <button class="btn" onclick="App.agregarMedCatalogo()">+ Agregar al catálogo</button>
+      `;
+    } else if (catalogo === 'esquemasEgreso') {
+      bodyHtml = items.map((es, idx) => `
+        <div class="card compact" style="margin-bottom:6px">
+          <div class="field" style="margin-bottom:6px">
+            <label>Nombre del esquema</label>
+            <input value="${escapeHtml(es.nombre||'')}" onchange="App.editarItemCatalogo('esquemasEgreso',${idx},'nombre',this.value)">
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>Contenido (una indicación por línea)</label>
+            <textarea rows="6" onchange="App.editarItemCatalogo('esquemasEgreso',${idx},'contenido',this.value)">${escapeHtml(es.contenido||'')}</textarea>
+          </div>
+          <div style="text-align:right;margin-top:6px">
+            <button class="btn ghost small" onclick="App.eliminarItemCatalogo('esquemasEgreso',${idx})">Eliminar</button>
+          </div>
+        </div>
+      `).join('');
+      bodyHtml += `
+        <hr>
+        <h4>Agregar nuevo esquema</h4>
+        <div class="field"><label>Nombre</label><input id="newEsqNombre" placeholder="Ej. Postop hombro"></div>
+        <div class="field"><label>Contenido</label><textarea id="newEsqContenido" rows="5" placeholder="Una indicación por línea"></textarea></div>
+        <button class="btn" onclick="App.agregarEsqCatalogo()">+ Agregar al catálogo</button>
+      `;
+    } else {
+      // Lista simple (diagnosticos, procedimientos, cirujanos)
+      bodyHtml = `
+        <div class="catalog-grid" style="margin-bottom:14px">
+          ${items.map((it, idx) => `
+            <div class="catalog-item" style="display:flex;justify-content:space-between;align-items:center;gap:6px">
+              <span style="flex:1">${escapeHtml(it)}</span>
+              <button class="btn ghost small" style="padding:2px 6px;font-size:.75rem" onclick="App.eliminarItemCatalogo('${catalogo}',${idx})">×</button>
+            </div>
+          `).join('')}
+        </div>
+        <hr>
+        <h4>Agregar nuevo</h4>
+        <div style="display:flex;gap:6px">
+          <input id="newSimpleItem" style="flex:1" placeholder="Escribe aquí y presiona Agregar">
+          <button class="btn" onclick="App.agregarSimpleCatalogo('${catalogo}')">+ Agregar</button>
+        </div>
+      `;
+    }
+
+    const html = `
+      <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
+        <div class="modal" style="max-width:780px">
+          <div class="modal-head">
+            <div>
+              <div style="font-weight:600">Administrar: ${titulos[catalogo]||catalogo}</div>
+              <div style="font-size:.8rem;opacity:.9">${items.length} item(s) · cambios se sincronizan a todos los dispositivos</div>
+            </div>
+            <button class="close-x" onclick="App.closeModal()">✕</button>
+          </div>
+          <div class="modal-body">${bodyHtml}</div>
+          <div class="modal-foot">
+            <button class="btn ghost" onclick="App.closeModal()">Cerrar</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.getElementById('modalRoot').innerHTML = html;
+  },
+
+  editarItemCatalogo(catalogo, idx, campo, valor) {
+    const items = getCatalogo(catalogo);
+    if (!items[idx]) return;
+    if (typeof items[idx] === 'string') {
+      items[idx] = valor;
+    } else {
+      items[idx][campo] = valor;
+    }
+    State.save();
+  },
+
+  eliminarItemCatalogo(catalogo, idx) {
+    if (!confirm('¿Eliminar este item del catálogo?')) return;
+    const items = getCatalogo(catalogo);
+    items.splice(idx, 1);
+    State.save();
+    this.openCatalogoAdmin(catalogo);
+  },
+
+  agregarSimpleCatalogo(catalogo) {
+    const inp = document.getElementById('newSimpleItem');
+    const v = (inp.value||'').trim();
+    if (!v) return;
+    const items = getCatalogo(catalogo);
+    if (items.some(x => (typeof x === 'string' ? x : x.nombre || '').toLowerCase() === v.toLowerCase())) {
+      alert('Ya existe.'); return;
+    }
+    items.push(v);
+    State.save();
+    this.openCatalogoAdmin(catalogo);
+  },
+
+  agregarMedCatalogo() {
+    const nombre = (document.getElementById('newMedNombre').value || '').trim();
+    if (!nombre) { alert('Pon al menos el nombre'); return; }
+    const items = getCatalogo('medicamentos');
+    items.push({
+      nombre,
+      dosis: document.getElementById('newMedDosis').value || '',
+      via: document.getElementById('newMedVia').value || '',
+      frecuencia: document.getElementById('newMedFrec').value || '',
+      nota: document.getElementById('newMedNota').value || ''
+    });
+    State.save();
+    this.openCatalogoAdmin('medicamentos');
+  },
+
+  agregarEsqCatalogo() {
+    const nombre = (document.getElementById('newEsqNombre').value || '').trim();
+    const contenido = (document.getElementById('newEsqContenido').value || '').trim();
+    if (!nombre || !contenido) { alert('Completa nombre y contenido.'); return; }
+    const items = getCatalogo('esquemasEgreso');
+    items.push({ nombre, contenido });
+    State.save();
+    this.openCatalogoAdmin('esquemasEgreso');
+  },
+
+  _aplicarEsquema(egresoId, campo, idxEsquema) {
+    const eg = State.data.egresos.find(x => x.id === egresoId);
+    if (!eg) return;
+    const esquema = getCatalogo('esquemasEgreso')[idxEsquema];
+    if (!esquema) return;
+    const previo = eg[campo] || '';
+    eg[campo] = previo + (previo ? '\n\n' : '') + esquema.contenido;
+    eg.modificado = new Date().toISOString();
+    State.save();
+    this.closeModal();
+    this.render();
   },
 
   copyText(t) {
@@ -1643,6 +2263,21 @@ service cloud.firestore {
           <button class="btn small" style="margin-top:6px" onclick="App.exportData()">Exportar ahora</button>
         </div>`
       : '';
+
+    // Filtros rápidos (chips)
+    const counts = this._countsPorFiltro(incluirEgresados);
+    const chips = `
+      <div class="filter-chips no-print">
+        ${this._chip('todos','Todos',counts.todos)}
+        ${this._chip('listos','Listos cirugía',counts.listos)}
+        ${this._chip('postop','Postoperatorios',counts.postop)}
+        ${this._chip('infeccion','Con infección',counts.infeccion)}
+        ${this._chip('hoy','Cirugía hoy',counts.hoy)}
+        ${this._chip('sinprog','Sin programar',counts.sinprog)}
+        ${this._chip('misPacientes','Mis pacientes',counts.misPacientes)}
+      </div>
+    `;
+
     return `
       ${banner}
       <div class="print-only" id="printHeader">
@@ -1650,8 +2285,10 @@ service cloud.firestore {
         <div class="print-sub" id="printSub"></div>
       </div>
 
+      ${chips}
+
       <div class="toolbar no-print">
-        <input type="search" id="searchInput" placeholder="Buscar por nombre, cédula, cama, dx..." value="${escapeHtml(State.search)}"
+        <input type="search" id="searchInput" placeholder="Buscar por nombre, cédula, cama, dx, cirujano..." value="${escapeHtml(State.search)}"
                oninput="App.setSearch(this.value)">
         <button class="btn ghost small" onclick="window.print()">🖨 Imprimir</button>
       </div>
@@ -1660,11 +2297,74 @@ service cloud.firestore {
     `;
   },
 
+  _chip(tipo, label, count) {
+    return `<button class="chip ${State.filterType===tipo?'active':''}" onclick="App.setFilter('${tipo}')">${label}<span class="count">${count}</span></button>`;
+  },
+
+  _countsPorFiltro(incluirEgresados) {
+    const base = State.data.patients.filter(p => incluirEgresados || !p.fechaEgreso);
+    const hoy = todayISO();
+    const programaHoy = (State.data.programas || []).find(prg => prg.fecha === hoy);
+    const idsHoy = new Set(programaHoy ? programaHoy.pacientes.map(e => e.pacienteId) : []);
+    const idsProgramados = new Set();
+    (State.data.programas || []).forEach(prg => {
+      if (prg.fecha >= hoy) prg.pacientes.forEach(e => {
+        if (e.operado === null) idsProgramados.add(e.pacienteId);
+      });
+    });
+    const yo = getCurrentUser();
+    return {
+      todos: base.length,
+      listos: base.filter(p => evaluarAptoCirugia(p).listo).length,
+      postop: base.filter(p => p.cirugia && p.cirugia.realizada).length,
+      infeccion: base.filter(p => tieneInfeccion(p)).length,
+      hoy: base.filter(p => idsHoy.has(p.id)).length,
+      sinprog: base.filter(p => evaluarAptoCirugia(p).listo && !idsProgramados.has(p.id)).length,
+      misPacientes: yo ? base.filter(p => (p.cirujano||'').toLowerCase().includes(yo.toLowerCase()) || ((p.cirujano||'').toLowerCase().split(' ').some(w => w && yo.toLowerCase().includes(w)))).length : 0
+    };
+  },
+
+  setFilter(tipo) {
+    State.filterType = tipo;
+    // Re-render: necesitamos recalcular los counts y la lista
+    this.render();
+  },
+
+  matchesFilter(p) {
+    const t = State.filterType;
+    if (!t || t === 'todos') return true;
+    if (t === 'listos') return evaluarAptoCirugia(p).listo;
+    if (t === 'postop') return p.cirugia && p.cirugia.realizada;
+    if (t === 'infeccion') return tieneInfeccion(p);
+    if (t === 'hoy') {
+      const programaHoy = (State.data.programas || []).find(prg => prg.fecha === todayISO());
+      if (!programaHoy) return false;
+      return programaHoy.pacientes.some(e => e.pacienteId === p.id);
+    }
+    if (t === 'sinprog') {
+      if (!evaluarAptoCirugia(p).listo) return false;
+      const enProg = (State.data.programas || []).some(prg =>
+        prg.fecha >= todayISO() && prg.pacientes.some(e => e.pacienteId === p.id && e.operado === null));
+      return !enProg;
+    }
+    if (t === 'misPacientes') {
+      const yo = (getCurrentUser()||'').toLowerCase();
+      if (!yo) return true;
+      const cir = (p.cirujano||'').toLowerCase();
+      if (!cir) return false;
+      // Coincidencia por inclusión de palabras (apellido suele bastar)
+      const palabrasYo = yo.split(' ').filter(w => w.length > 2);
+      return palabrasYo.some(w => cir.includes(w));
+    }
+    return true;
+  },
+
   // Sólo el contenido de la lista — sin la casilla de búsqueda. Se re-renderiza al filtrar
   // sin destruir el input y por lo tanto sin perder el foco del teclado.
   renderPatientListContent(incluirEgresados) {
     const pacientes = State.data.patients
       .filter(p => incluirEgresados || !p.fechaEgreso)
+      .filter(p => this.matchesFilter(p))
       .filter(p => this.matchesSearch(p))
       .sort((a,b) => {
         const ca = (a.cama||'').toString();
@@ -1800,6 +2500,7 @@ service cloud.firestore {
     if (!q) return true;
     const blob = [
       p.nombre, p.cedula, p.cama, p.cirujano,
+      p.alergias, p.antecedentesPatologicos,
       ...(p.diagnosticos||[])
     ].join(' ').toLowerCase();
     return blob.includes(q);
@@ -2161,7 +2862,11 @@ service cloud.firestore {
             </div>
 
             <div class="field" style="margin-top:8px;margin-bottom:8px">
-              <label>Procedimiento</label>
+              <div class="row-between" style="margin-bottom:4px">
+                <label style="margin:0">Procedimiento</label>
+                <button class="btn ghost small" style="padding:2px 8px;font-size:.75rem"
+                  onclick="App.openCatalogoPickerEntrada('procedimientos','${prg.id}','${e.id}')">+ Desde catálogo</button>
+              </div>
               <textarea rows="2" placeholder="Ej. RAFI con placa LCP de tibia distal"
                 oninput="App.setEntrada('${prg.id}','${e.id}','procedimiento',this.value)">${escapeHtml(e.procedimiento||'')}</textarea>
             </div>
@@ -2175,7 +2880,7 @@ service cloud.firestore {
               </div>
               <div class="field" style="margin-bottom:0">
                 <label>Médico a cargo</label>
-                <input value="${escapeHtml(e.medicoCargo||p.cirujano||'')}" oninput="App.setEntrada('${prg.id}','${e.id}','medicoCargo',this.value)">
+                <input list="cirujanosList" value="${escapeHtml(e.medicoCargo||p.cirujano||'')}" oninput="App.setEntrada('${prg.id}','${e.id}','medicoCargo',this.value)">
               </div>
             </div>
 
@@ -2764,7 +3469,10 @@ service cloud.firestore {
 
       <!-- Medicamentos al egreso -->
       <div class="card">
-        <h3>Medicamentos al egreso</h3>
+        <div class="row-between">
+          <h3 style="margin:0">Medicamentos al egreso</h3>
+          <button class="btn ghost small no-print" onclick="App.openEsquemaPicker('${eg.id}','medicamentosEgreso')">+ Insertar esquema</button>
+        </div>
         <textarea rows="4" class="no-print" placeholder="Ej.&#10;Acetaminofén 500mg VO c/8h por 7 días&#10;Enoxaparina 40mg SC cada día por 14 días&#10;Cefalexina 500mg VO c/6h por 7 días"
           oninput="App.setEgreso('${eg.id}','medicamentosEgreso',this.value)">${escapeHtml(eg.medicamentosEgreso||'')}</textarea>
         <div class="print-only" style="white-space:pre-wrap">${escapeHtml(eg.medicamentosEgreso||'—')}</div>
@@ -2887,7 +3595,10 @@ service cloud.firestore {
 
       <!-- Recomendaciones -->
       <div class="card">
-        <h3>Recomendaciones generales</h3>
+        <div class="row-between">
+          <h3 style="margin:0">Recomendaciones generales</h3>
+          <button class="btn ghost small no-print" onclick="App.openEsquemaPicker('${eg.id}','recomendaciones')">+ Insertar esquema</button>
+        </div>
         <textarea rows="4" class="no-print" placeholder="Reposo, dieta, signos de alarma para regresar a urgencias, fisioterapia, restricciones de carga, etc."
           oninput="App.setEgreso('${eg.id}','recomendaciones',this.value)">${escapeHtml(eg.recomendaciones||'')}</textarea>
         <div class="print-only" style="white-space:pre-wrap">${escapeHtml(eg.recomendaciones||'—')}</div>
@@ -3290,7 +4001,10 @@ service cloud.firestore {
           </div>
           <div class="field">
             <label>Cirujano a cargo</label>
-            <input value="${escapeHtml(p.cirujano)}" oninput="App.actualizar('${p.id}','cirujano',this.value)">
+            <input list="cirujanosList" value="${escapeHtml(p.cirujano)}" oninput="App.actualizar('${p.id}','cirujano',this.value)" placeholder="Empieza a escribir...">
+            <datalist id="cirujanosList">
+              ${getCatalogo('cirujanos').map(c => `<option value="${escapeHtml(c)}">`).join('')}
+            </datalist>
           </div>
         </div>
         <div class="field-row">
@@ -3316,7 +4030,10 @@ service cloud.firestore {
       </div>
 
       <div class="card">
-        <h3>Diagnósticos</h3>
+        <div class="row-between">
+          <h3 style="margin:0">Diagnósticos</h3>
+          <button class="btn ghost small" onclick="App.openCatalogoPicker('diagnosticos','${p.id}')">+ Desde catálogo</button>
+        </div>
         <p class="muted">Agregue uno por línea. Si incluye "infección", "osteomielitis", "absceso", "celulitis" o "sepsis" se activará el recordatorio de control de infección a los 7 días.</p>
         <textarea rows="4" placeholder="Ej.&#10;Fractura cerrada de tibia derecha&#10;Osteomielitis crónica de fémur izquierdo"
           onchange="App.actualizarDx('${p.id}', this.value)">${escapeHtml((p.diagnosticos||[]).join('\n'))}</textarea>
@@ -3677,7 +4394,10 @@ service cloud.firestore {
       <div class="card">
         <div class="row-between">
           <h3 style="margin:0">Medicamentos en curso</h3>
-          <button class="btn small" onclick="App.addMed('${p.id}')">+ Agregar</button>
+          <div class="row-gap">
+            <button class="btn ghost small" onclick="App.openMedTemplatePicker('${p.id}')">+ Desde plantilla</button>
+            <button class="btn small" onclick="App.addMed('${p.id}')">+ Vacío</button>
+          </div>
         </div>
         ${meds.length===0?`<div class="muted" style="margin-top:8px">Sin medicamentos registrados.</div>`:''}
         ${meds.map(m => {
