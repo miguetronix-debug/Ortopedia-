@@ -398,7 +398,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v2.2-conteo-cirugias-2026-05-08';
+const APP_VERSION = 'v2.3-fix-preop-operado-2026-05-08';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -2848,7 +2848,11 @@ service cloud.firestore {
 
     const aptoBadge = apto.listo
       ? `<span class="pill ready">✓ Listo cirugía</span>`
-      : (tieneContraindicacion(p) ? `<span class="pill notready">No apto</span>` : `<span class="pill pending">Pendiente</span>`);
+      : apto.operado
+        ? (p.requiereOtraCirugia
+            ? `<span class="pill pending">Operado · pendiente otra cirugía</span>`
+            : `<span class="pill ready">✓ Operado</span>`)
+        : (tieneContraindicacion(p) ? `<span class="pill notready">No apto</span>` : `<span class="pill pending">Pendiente</span>`);
 
     const html = `
       <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
@@ -2984,11 +2988,38 @@ service cloud.firestore {
     const edad = parseInt(p.edad,10);
     const requiereCompletos = (edad>=50) || tieneAntecedentes(p);
 
-    const aptoBox = apto.listo
-      ? `<div class="alert-box green"><strong>✓ Paciente listo para cirugía.</strong> ${escapeHtml(apto.motivo)}.</div>`
-      : (tieneContraindicacion(p)
-        ? `<div class="alert-box red"><strong>✗ No apto.</strong> ${escapeHtml(apto.motivo)}</div>`
-        : `<div class="alert-box yellow"><strong>Faltan estudios:</strong> ${apto.faltantes.map(escapeHtml).join(', ')}</div>`);
+    const ult = ultimaCirugia(p);
+    const totalCir = (p.cirugiasRealizadas || []).length;
+    let aptoBox;
+    if (apto.listo) {
+      aptoBox = `<div class="alert-box green"><strong>✓ Paciente listo para cirugía.</strong> ${escapeHtml(apto.motivo)}.</div>`;
+    } else if (apto.operado) {
+      // Paciente ya operado — sólo es candidato si se marca "Requiere otra cirugía"
+      aptoBox = `
+        <div class="alert-box green">
+          <strong>✓ Paciente ya operado.</strong>
+          ${totalCir>0?`Lleva ${totalCir} cirugía(s) durante esta hospitalización.`:''}
+          Última cirugía: ${escapeHtml(ult.procedimiento||'')}${ult.lateralidad?' ('+escapeHtml(ult.lateralidad)+')':''} el ${fmtDate(ult.fecha)}.
+        </div>
+        <div class="card" style="border-left:4px solid #f59e0b">
+          <div class="checkbox-row">
+            <input type="checkbox" id="reqotra-preop-${p.id}" ${p.requiereOtraCirugia?'checked':''}
+              onchange="App.toggleRequiereOtraCirugia('${p.id}',this.checked)">
+            <label for="reqotra-preop-${p.id}"><strong>Requiere otra cirugía</strong></label>
+          </div>
+          <div class="muted" style="font-size:.85rem;margin-top:6px">
+            Marca esta casilla si el paciente, ya operado, va a necesitar otra intervención (lavado quirúrgico, etapa siguiente, complicación, fractura expuesta, infección que requiere lavados seriados, etc.).
+            <br>Mientras esté marcada, el paciente aparecerá nuevamente en la lista <em>Listos para cirugía</em> y podrá agregarse a un programa.
+          </div>
+        </div>
+      `;
+    } else if (tieneContraindicacion(p)) {
+      aptoBox = `<div class="alert-box red"><strong>✗ No apto.</strong> ${escapeHtml(apto.motivo)}</div>`;
+    } else {
+      aptoBox = apto.faltantes && apto.faltantes.length > 0
+        ? `<div class="alert-box yellow"><strong>Faltan estudios:</strong> ${apto.faltantes.map(escapeHtml).join(', ')}</div>`
+        : `<div class="alert-box yellow"><strong>Pendiente:</strong> ${escapeHtml(apto.motivo||'revisar preoperatorio')}</div>`;
+    }
 
     const reglaTxt = requiereCompletos
       ? `Por edad o antecedentes, este paciente requiere <strong>preoperatorio completo</strong> (laboratorios completos, EKG, Rx tórax y evaluación preoperatoria por M.I., M.F., Geriatría o subespecialidad).`
@@ -3544,7 +3575,11 @@ service cloud.firestore {
       const dias = daysBetween(p.fechaIngreso);
       const aptoBadge = apto.listo
         ? `<span class="pill ready">✓ Listo cirugía</span>`
-        : (tieneContraindicacion(p) ? `<span class="pill notready">No apto</span>` : `<span class="pill pending">Pendiente</span>`);
+        : apto.operado
+          ? (p.requiereOtraCirugia
+              ? `<span class="pill pending">Operado · pendiente otra cirugía</span>`
+              : `<span class="pill ready">✓ Operado</span>`)
+          : (tieneContraindicacion(p) ? `<span class="pill notready">No apto</span>` : `<span class="pill pending">Pendiente</span>`);
       head.innerHTML = `
         <div>
           <div style="font-weight:600">${escapeHtml(p.nombre || '(Nuevo paciente)')}</div>
