@@ -396,7 +396,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v1.3-embed-2026-05-08';
+const APP_VERSION = 'v1.4-search-fix-2026-05-08';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -1029,6 +1029,26 @@ service cloud.firestore {
 
   /* ---------- Pase de visita / lista por cama ---------- */
   renderLista(incluirEgresados) {
+    const titulo = incluirEgresados ? 'Todos los pacientes' : 'Pase de visita (por cama)';
+    return `
+      <div class="print-only" id="printHeader">
+        <div class="print-title">Servicio de Ortopedia — ${titulo}</div>
+        <div class="print-sub" id="printSub"></div>
+      </div>
+
+      <div class="toolbar no-print">
+        <input type="search" id="searchInput" placeholder="Buscar por nombre, cédula, cama, dx..." value="${escapeHtml(State.search)}"
+               oninput="App.setSearch(this.value)">
+        <button class="btn ghost small" onclick="window.print()">🖨 Imprimir</button>
+      </div>
+
+      <div id="patientListContainer">${this.renderPatientListContent(incluirEgresados)}</div>
+    `;
+  },
+
+  // Sólo el contenido de la lista — sin la casilla de búsqueda. Se re-renderiza al filtrar
+  // sin destruir el input y por lo tanto sin perder el foco del teclado.
+  renderPatientListContent(incluirEgresados) {
     const pacientes = State.data.patients
       .filter(p => incluirEgresados || !p.fechaEgreso)
       .filter(p => this.matchesSearch(p))
@@ -1040,33 +1060,20 @@ service cloud.firestore {
         return ca.localeCompare(cb, 'es');
       });
 
-    const titulo = incluirEgresados ? 'Todos los pacientes' : 'Pase de visita (por cama)';
-    const subt = `${pacientes.length} paciente(s)${incluirEgresados?' incluyendo egresados':' activos'}`;
-
-    let html = `
-      <div class="print-only">
-        <div class="print-title">Servicio de Ortopedia — ${titulo}</div>
-        <div class="print-sub">${new Date().toLocaleString('es')} · ${pacientes.length} pacientes</div>
-      </div>
-
-      <div class="toolbar no-print">
-        <input type="search" placeholder="Buscar por nombre, cédula, cama, dx..." value="${escapeHtml(State.search)}"
-               oninput="App.setSearch(this.value)">
-        <button class="btn ghost small" onclick="window.print()">🖨 Imprimir</button>
-      </div>
-    `;
-
     if (pacientes.length === 0) {
-      html += `<div class="empty">
-        <div class="ico">🛏️</div>
-        <div>No hay pacientes ${incluirEgresados?'':'activos'}.</div>
-        <div style="margin-top:10px"><button class="btn" onclick="App.openNew()">+ Agregar primer paciente</button></div>
+      const sinFiltro = !State.search;
+      return `<div class="empty">
+        <div class="ico">${sinFiltro?'🛏️':'🔍'}</div>
+        <div>${sinFiltro
+          ? `No hay pacientes ${incluirEgresados?'':'activos'}.`
+          : `Sin resultados para "${escapeHtml(State.search)}".`}</div>
+        ${sinFiltro
+          ? `<div style="margin-top:10px"><button class="btn" onclick="App.openNew()">+ Agregar primer paciente</button></div>`
+          : ''}
       </div>`;
-      return html;
     }
 
-    // Versión compacta para impresión
-    html += `
+    let html = `
       <div class="card print-only">
         <table>
           <thead><tr>
@@ -1093,7 +1100,6 @@ service cloud.firestore {
       </div>
     `;
 
-    // Versión interactiva
     html += `<div class="no-print">${pacientes.map(p => this.renderPatientCard(p)).join('')}</div>`;
     return html;
   },
@@ -1143,6 +1149,15 @@ service cloud.firestore {
 
   setSearch(v) {
     State.search = v;
+    // Sólo actualizar la lista, no la casilla de búsqueda — así el input no
+    // pierde el foco del teclado al escribir cada letra.
+    if (State.currentTab === 'lista' || State.currentTab === 'todos') {
+      const container = document.getElementById('patientListContainer');
+      if (container) {
+        container.innerHTML = this.renderPatientListContent(State.currentTab === 'todos');
+        return;
+      }
+    }
     this.render();
   },
 
