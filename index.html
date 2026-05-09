@@ -351,6 +351,80 @@
   .catalog-item:hover { background: #cbd5e1; }
   .catalog-item.selected { background: #d1fae5; border: 1px solid #059669; }
 
+  /* Reportes */
+  .kpi-grid {
+    display: grid; gap: 10px;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    margin-bottom: 16px;
+  }
+  .kpi {
+    background: white; border-radius: 10px;
+    padding: 12px 14px;
+    border-left: 4px solid #3282b8;
+    box-shadow: 0 1px 3px rgba(0,0,0,.05);
+  }
+  .kpi .kpi-label {
+    font-size: .75rem; color: #6b7280;
+    text-transform: uppercase; letter-spacing: .04em;
+    font-weight: 500;
+  }
+  .kpi .kpi-value {
+    font-size: 2rem; font-weight: 700;
+    color: #0f4c75; line-height: 1.1; margin-top: 4px;
+  }
+  .kpi .kpi-sub { font-size: .82rem; color: #6b7280; margin-top: 2px; }
+  .kpi.green { border-left-color: #059669; }
+  .kpi.green .kpi-value { color: #059669; }
+  .kpi.red { border-left-color: #dc2626; }
+  .kpi.red .kpi-value { color: #dc2626; }
+  .kpi.yellow { border-left-color: #f59e0b; }
+  .kpi.yellow .kpi-value { color: #b45309; }
+
+  /* Gráficos de barras horizontales simples */
+  .bar-chart { margin-top: 6px; }
+  .bar-row {
+    display: grid;
+    grid-template-columns: 180px 1fr 50px;
+    gap: 8px; align-items: center;
+    margin-bottom: 6px; font-size: .85rem;
+  }
+  @media (max-width: 600px) {
+    .bar-row { grid-template-columns: 130px 1fr 40px; font-size: .8rem; }
+  }
+  .bar-row .bar-label { color: #334155; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar-row .bar-track {
+    background: #e5e7eb; border-radius: 4px; height: 16px; position: relative;
+  }
+  .bar-row .bar-fill {
+    background: #3282b8; height: 100%; border-radius: 4px;
+    transition: width .3s ease;
+  }
+  .bar-row .bar-value { text-align: right; font-weight: 600; color: #0f4c75; }
+
+  /* Bar chart vertical (para tendencias por mes) */
+  .vbar-chart {
+    display: flex; gap: 4px; align-items: flex-end;
+    height: 120px; margin-top: 8px; padding-bottom: 22px; position: relative;
+  }
+  .vbar-col {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; height: 100%; position: relative;
+  }
+  .vbar-fill {
+    width: 100%; background: #3282b8; border-radius: 4px 4px 0 0;
+    min-height: 2px;
+  }
+  .vbar-label {
+    position: absolute; bottom: -22px;
+    font-size: .72rem; color: #6b7280; text-align: center;
+    width: 100%; line-height: 1.1;
+  }
+  .vbar-count {
+    position: absolute; top: -16px;
+    font-size: .72rem; color: #0f4c75; font-weight: 700;
+    width: 100%; text-align: center;
+  }
+
   /* Modales secundarios (catálogos / plantillas) — quedan por encima del modal principal */
   #modalRoot2 .modal-backdrop { z-index: 300; background: rgba(15,23,42,.65); }
   #modalRoot2 .modal { max-height: calc(100vh - 20px); }
@@ -425,6 +499,7 @@
   <button data-tab="cirugia" onclick="App.switchTab('cirugia')">Listos para cirugía</button>
   <button data-tab="programa" onclick="App.switchTab('programa')">Programa Qx</button>
   <button data-tab="salidas" onclick="App.switchTab('salidas')">Salida</button>
+  <button data-tab="reportes" onclick="App.switchTab('reportes')">Reportes</button>
   <button data-tab="alertas" onclick="App.switchTab('alertas')">Alertas <span class="badge" id="alertCount" style="display:none">0</span></button>
   <button data-tab="todos" onclick="App.switchTab('todos')">Todos</button>
 </nav>
@@ -442,7 +517,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.4-fix-sync-catalogos-2026-05-09';
+const APP_VERSION = 'v3.5-fase3-reportes-2026-05-09';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -2246,6 +2321,7 @@ service cloud.firestore {
     else if (t === 'cirugia') view.innerHTML = this.renderCirugia();
     else if (t === 'programa') view.innerHTML = this.renderPrograma();
     else if (t === 'salidas') view.innerHTML = this.renderSalidas();
+    else if (t === 'reportes') view.innerHTML = this.renderReportes();
     else if (t === 'alertas') view.innerHTML = this.renderAlertas();
     else if (t === 'todos') view.innerHTML = this.renderLista(true);
     this.refreshAlertCount();
@@ -3824,6 +3900,366 @@ service cloud.firestore {
     State.save();
     this._currentEgresoId = null;
     this.render();
+  },
+
+  /* ============================================================
+     REPORTES — métricas administrativas del servicio
+     ============================================================ */
+  renderReportes() {
+    const m = this._metricasResumen();
+    const cfg = getConfig();
+    const hospName = cfg.hospitalNombre ? `${escapeHtml(cfg.hospitalNombre)} — ` : '';
+
+    return `
+      <div class="print-only">
+        <div class="print-title">${hospName}Reportes — Servicio de ${escapeHtml(cfg.servicio||'Ortopedia')}</div>
+        <div class="print-sub">Generado el ${new Date().toLocaleString('es')}</div>
+      </div>
+
+      <div class="toolbar no-print">
+        <h2 style="margin:0">Reportes</h2>
+        <div style="flex:1"></div>
+        <button class="btn ghost small" onclick="App.exportarCSV('pacientes')">📊 CSV pacientes</button>
+        <button class="btn ghost small" onclick="App.exportarCSV('cirugias')">📊 CSV cirugías</button>
+        <button class="btn ghost small" onclick="App.exportarCSV('egresos')">📊 CSV egresos</button>
+        <button class="btn ghost small" onclick="window.print()">🖨 Imprimir</button>
+      </div>
+
+      <!-- KPIs principales -->
+      <div class="kpi-grid">
+        <div class="kpi">
+          <div class="kpi-label">Pacientes activos</div>
+          <div class="kpi-value">${m.activos}</div>
+          <div class="kpi-sub">en hospitalización</div>
+        </div>
+        <div class="kpi green">
+          <div class="kpi-label">Listos para cirugía</div>
+          <div class="kpi-value">${m.listos}</div>
+          <div class="kpi-sub">cumplen criterios preop</div>
+        </div>
+        <div class="kpi green">
+          <div class="kpi-label">Postoperatorios</div>
+          <div class="kpi-value">${m.postop}</div>
+          <div class="kpi-sub">${m.diasPostopProm.toFixed(1)} días promedio</div>
+        </div>
+        <div class="kpi yellow">
+          <div class="kpi-label">Con infección</div>
+          <div class="kpi-value">${m.conInfeccion}</div>
+          <div class="kpi-sub">requieren control especial</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Estancia promedio</div>
+          <div class="kpi-value">${m.estanciaProm.toFixed(1)}</div>
+          <div class="kpi-sub">días hospitalizado (egresados últimos 30 d)</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Cirugías este mes</div>
+          <div class="kpi-value">${m.cirugiasMesActual}</div>
+          <div class="kpi-sub">desde el día 1 del mes</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Egresos último mes</div>
+          <div class="kpi-value">${m.egresosUltimoMes}</div>
+          <div class="kpi-sub">últimos 30 días</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Tiempo a cirugía</div>
+          <div class="kpi-value">${m.tiempoACirugiaProm.toFixed(1)}</div>
+          <div class="kpi-sub">días promedio (ingreso → operar)</div>
+        </div>
+      </div>
+
+      <!-- Cirugías por mes -->
+      <div class="card">
+        <h3>Cirugías por mes (últimos 6 meses)</h3>
+        ${this._renderVBarChart(this._cirugiasUltimosMeses(6))}
+      </div>
+
+      <!-- Egresos por mes -->
+      <div class="card">
+        <h3>Egresos por mes (últimos 6 meses)</h3>
+        ${this._renderVBarChart(this._egresosUltimosMeses(6))}
+      </div>
+
+      <!-- Top diagnósticos -->
+      <div class="card">
+        <h3>Diagnósticos más frecuentes</h3>
+        <p class="muted" style="font-size:.85rem">Sobre todos los pacientes (activos + egresados).</p>
+        ${this._renderHBarChart(this._topDiagnosticos(15))}
+      </div>
+
+      <!-- Top cirujanos -->
+      <div class="card">
+        <h3>Distribución por cirujano (cirugías realizadas)</h3>
+        <p class="muted" style="font-size:.85rem">Total histórico desde que se usa la app.</p>
+        ${this._renderHBarChart(this._topCirujanos(20))}
+      </div>
+
+      <!-- Aptitud quirúrgica -->
+      <div class="card">
+        <h3>Estado preoperatorio de pacientes activos</h3>
+        ${this._renderHBarChart([
+          {label:'Listos para cirugía', value:m.listos, total:m.activos, color:'#059669'},
+          {label:'Operados (postop)', value:m.postop, total:m.activos, color:'#3282b8'},
+          {label:'Pendientes preop', value:m.pendientesPreop, total:m.activos, color:'#f59e0b'},
+          {label:'Con contraindicación', value:m.contraindicados, total:m.activos, color:'#dc2626'}
+        ])}
+      </div>
+
+      <!-- Procedimientos más realizados -->
+      <div class="card">
+        <h3>Procedimientos más realizados</h3>
+        ${this._renderHBarChart(this._topProcedimientos(15))}
+      </div>
+
+      <!-- Pie de impresión -->
+      <div class="print-only" style="margin-top:24px;font-size:.8em;color:#666;border-top:1px solid #ccc;padding-top:8px">
+        Total de pacientes registrados: ${State.data.patients.length}
+        · Programas registrados: ${(State.data.programas||[]).length}
+        · Egresos: ${(State.data.egresos||[]).length}
+      </div>
+    `;
+  },
+
+  /* ---------- Cálculos de métricas ---------- */
+  _metricasResumen() {
+    const pats = State.data.patients || [];
+    const activos = pats.filter(p => !p.fechaEgreso);
+    const hoy = new Date();
+    const hace30 = new Date(hoy.getTime() - 30*24*60*60*1000).toISOString().slice(0,10);
+    const inicioMes = hoy.toISOString().slice(0,7) + '-01';
+
+    const listos = activos.filter(p => evaluarAptoCirugia(p).listo).length;
+    const postopList = activos.filter(p => p.cirugia && p.cirugia.realizada);
+    const postop = postopList.length;
+    const diasPostopProm = postopList.length > 0
+      ? postopList.reduce((s,p) => s + (diasPostop(p)||0), 0) / postopList.length
+      : 0;
+    const conInfeccion = activos.filter(p => tieneInfeccion(p)).length;
+
+    // Estancia promedio de egresos últimos 30 días
+    const egresosRecientes = pats.filter(p => p.fechaEgreso && p.fechaEgreso >= hace30);
+    const estanciaProm = egresosRecientes.length > 0
+      ? egresosRecientes.reduce((s,p) => s + daysBetween(p.fechaIngreso, p.fechaEgreso), 0) / egresosRecientes.length
+      : 0;
+
+    // Cirugías del mes actual
+    let cirugiasMesActual = 0;
+    pats.forEach(p => {
+      (p.cirugiasRealizadas || []).forEach(c => {
+        if (c.fecha && c.fecha >= inicioMes) cirugiasMesActual++;
+      });
+    });
+
+    // Egresos último mes (últimos 30 días)
+    const egresosUltimoMes = pats.filter(p => p.fechaEgreso && p.fechaEgreso >= hace30).length;
+
+    // Tiempo a cirugía promedio (días desde ingreso hasta primera cirugía)
+    const conCirugia = pats.filter(p => (p.cirugiasRealizadas||[]).length > 0 && p.fechaIngreso);
+    const tiempoACirugiaProm = conCirugia.length > 0
+      ? conCirugia.reduce((s,p) => {
+          const primera = p.cirugiasRealizadas.slice().sort((a,b)=>(a.fecha||'').localeCompare(b.fecha||''))[0];
+          return s + daysBetween(p.fechaIngreso, primera.fecha);
+        }, 0) / conCirugia.length
+      : 0;
+
+    // Estado preoperatorio
+    let pendientesPreop = 0, contraindicados = 0;
+    activos.forEach(p => {
+      const a = evaluarAptoCirugia(p);
+      if (a.listo) return;
+      if (a.operado) return;
+      if (tieneContraindicacion(p)) contraindicados++;
+      else pendientesPreop++;
+    });
+
+    return {
+      activos: activos.length,
+      listos, postop, diasPostopProm, conInfeccion,
+      estanciaProm, cirugiasMesActual, egresosUltimoMes,
+      tiempoACirugiaProm, pendientesPreop, contraindicados
+    };
+  },
+
+  _cirugiasUltimosMeses(n) {
+    const meses = [];
+    const hoy = new Date();
+    for (let i = n-1; i >= 0; i--) {
+      const d = new Date(hoy.getFullYear(), hoy.getMonth() - i, 1);
+      const ym = d.toISOString().slice(0,7);
+      meses.push({ ym, label: d.toLocaleDateString('es', {month:'short', year:'2-digit'}), value: 0 });
+    }
+    State.data.patients.forEach(p => {
+      (p.cirugiasRealizadas || []).forEach(c => {
+        if (!c.fecha) return;
+        const ym = c.fecha.slice(0,7);
+        const m = meses.find(x => x.ym === ym);
+        if (m) m.value++;
+      });
+    });
+    return meses;
+  },
+
+  _egresosUltimosMeses(n) {
+    const meses = [];
+    const hoy = new Date();
+    for (let i = n-1; i >= 0; i--) {
+      const d = new Date(hoy.getFullYear(), hoy.getMonth() - i, 1);
+      const ym = d.toISOString().slice(0,7);
+      meses.push({ ym, label: d.toLocaleDateString('es', {month:'short', year:'2-digit'}), value: 0 });
+    }
+    State.data.patients.forEach(p => {
+      if (!p.fechaEgreso) return;
+      const ym = p.fechaEgreso.slice(0,7);
+      const m = meses.find(x => x.ym === ym);
+      if (m) m.value++;
+    });
+    return meses;
+  },
+
+  _topDiagnosticos(n) {
+    const counts = {};
+    State.data.patients.forEach(p => {
+      (p.diagnosticos || []).forEach(d => {
+        const k = d.trim();
+        if (!k) return;
+        counts[k] = (counts[k] || 0) + 1;
+      });
+    });
+    const arr = Object.entries(counts)
+      .map(([label, value]) => ({label, value}))
+      .sort((a,b) => b.value - a.value)
+      .slice(0, n);
+    return arr;
+  },
+
+  _topCirujanos(n) {
+    const counts = {};
+    State.data.patients.forEach(p => {
+      (p.cirugiasRealizadas || []).forEach(c => {
+        const k = (c.cirujano||'').trim() || '(sin asignar)';
+        counts[k] = (counts[k] || 0) + 1;
+      });
+    });
+    return Object.entries(counts)
+      .map(([label, value]) => ({label, value}))
+      .sort((a,b) => b.value - a.value)
+      .slice(0, n);
+  },
+
+  _topProcedimientos(n) {
+    const counts = {};
+    State.data.patients.forEach(p => {
+      (p.cirugiasRealizadas || []).forEach(c => {
+        const k = (c.procedimiento||'').trim() || '(sin especificar)';
+        counts[k] = (counts[k] || 0) + 1;
+      });
+    });
+    return Object.entries(counts)
+      .map(([label, value]) => ({label, value}))
+      .sort((a,b) => b.value - a.value)
+      .slice(0, n);
+  },
+
+  /* ---------- Renderers de gráficos ---------- */
+  _renderHBarChart(items) {
+    if (!items || items.length === 0) {
+      return `<div class="muted">Sin datos suficientes.</div>`;
+    }
+    const max = Math.max(...items.map(it => it.total ? it.total : it.value), 1);
+    return `<div class="bar-chart">
+      ${items.map(it => {
+        const pct = (it.value / max) * 100;
+        const color = it.color || '#3282b8';
+        return `<div class="bar-row">
+          <div class="bar-label" title="${escapeHtml(it.label)}">${escapeHtml(it.label)}</div>
+          <div class="bar-track">
+            <div class="bar-fill" style="width:${pct.toFixed(1)}%;background:${color}"></div>
+          </div>
+          <div class="bar-value">${it.value}</div>
+        </div>`;
+      }).join('')}
+    </div>`;
+  },
+
+  _renderVBarChart(items) {
+    if (!items || items.length === 0) return `<div class="muted">Sin datos.</div>`;
+    const max = Math.max(...items.map(it => it.value), 1);
+    return `<div class="vbar-chart">
+      ${items.map(it => {
+        const h = (it.value / max) * 100;
+        return `<div class="vbar-col">
+          <div class="vbar-count">${it.value}</div>
+          <div class="vbar-fill" style="height:${h}%"></div>
+          <div class="vbar-label">${escapeHtml(it.label)}</div>
+        </div>`;
+      }).join('')}
+    </div>`;
+  },
+
+  /* ---------- Exportar a CSV ---------- */
+  exportarCSV(tipo) {
+    let header = [], rows = [];
+    if (tipo === 'pacientes') {
+      header = ['ID','Nombre','Cédula','Edad','Sexo','Cama','Cirujano','Fecha ingreso','Fecha egreso','Días hospitalización','Diagnósticos','Alergias','Antecedentes','# Cirugías','Cirugías','Estado'];
+      rows = State.data.patients.map(p => {
+        const dias = p.fechaIngreso ? daysBetween(p.fechaIngreso, p.fechaEgreso) : '';
+        const apto = evaluarAptoCirugia(p);
+        const estado = p.fechaEgreso ? 'Egresado'
+          : apto.listo ? 'Listo cirugía'
+          : apto.operado ? 'Operado' + (p.requiereOtraCirugia ? ' (req otra)' : '')
+          : tieneContraindicacion(p) ? 'No apto' : 'Pendiente preop';
+        const cirugias = (p.cirugiasRealizadas||[]).map(c => `${c.fecha} ${c.procedimiento||''}`).join(' | ');
+        return [
+          p.id, p.nombre||'', p.cedula||'', p.edad||'', p.sexo||'', p.cama||'', p.cirujano||'',
+          p.fechaIngreso||'', p.fechaEgreso||'', dias,
+          (p.diagnosticos||[]).join(' | '), p.alergias||'', p.antecedentesPatologicos||'',
+          (p.cirugiasRealizadas||[]).length, cirugias, estado
+        ];
+      });
+    } else if (tipo === 'cirugias') {
+      header = ['Fecha','Paciente','Cédula','Edad','Procedimiento','Lateralidad','Cirujano','Quirófano','Diagnóstico','Notas'];
+      State.data.patients.forEach(p => {
+        (p.cirugiasRealizadas||[]).forEach(c => {
+          rows.push([
+            c.fecha||'', p.nombre||'', p.cedula||'', p.edad||'',
+            c.procedimiento||'', c.lateralidad||'', c.cirujano||'', c.quirofano||'',
+            (p.diagnosticos||[]).join(' | '), c.notas||''
+          ]);
+        });
+      });
+      rows.sort((a,b) => (b[0]||'').localeCompare(a[0]||''));
+    } else if (tipo === 'egresos') {
+      header = ['Fecha egreso','Paciente','Cédula','Edad','Cama','Días hospitalización','Cirujano','Dx final','# Cirugías','Cita control','Lugar cita','Rx control'];
+      (State.data.egresos||[]).forEach(eg => {
+        const p = State.data.patients.find(x => x.id === eg.pacienteId) || {};
+        const dias = p.fechaIngreso ? daysBetween(p.fechaIngreso, eg.fechaEgreso) : '';
+        rows.push([
+          eg.fechaEgreso||'', p.nombre||'', p.cedula||'', p.edad||'', p.cama||'',
+          dias, p.cirujano||'',
+          eg.diagnosticoFinal || (p.diagnosticos||[]).join(' | '),
+          (eg.cirugiasResumen||[]).length,
+          (eg.citaControl||{}).fecha || '',
+          (eg.citaControl||{}).lugar || '',
+          (eg.rayosXControl||{}).requiere ? (eg.rayosXControl.descripcion || 'sí') : 'no'
+        ]);
+      });
+      rows.sort((a,b) => (b[0]||'').localeCompare(a[0]||''));
+    }
+
+    const csvEscape = (v) => {
+      const s = String(v == null ? '' : v);
+      if (/[",\n;]/.test(s)) return '"' + s.replace(/"/g,'""') + '"';
+      return s;
+    };
+    const csv = [header, ...rows].map(r => r.map(csvEscape).join(',')).join('\n');
+    const blob = new Blob(['﻿' + csv], { type:'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ortopedia_${tipo}_${todayISO()}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
   },
 
   /* ---------- Alertas globales ---------- */
