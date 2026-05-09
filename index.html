@@ -398,7 +398,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v2.3-fix-preop-operado-2026-05-08';
+const APP_VERSION = 'v2.4-fix-selector-reop-2026-05-08';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -1925,11 +1925,13 @@ service cloud.firestore {
   agregarAPrograma(programaId) {
     const prg = State.data.programas.find(p => p.id === programaId);
     if (!prg) return;
-    // Candidatos: SOLO pacientes listos para cirugía, no en este programa, no operados, no egresados
+    // Candidatos: pacientes listos para cirugía (incluyendo operados con flag "requiere otra cirugía")
+    // No filtramos operados explícitamente porque evaluarAptoCirugia ya maneja eso correctamente:
+    //   - operado sin flag → listo:false
+    //   - operado con flag + preop OK → listo:true (vuelve a aparecer)
     const yaEnPrg = new Set(prg.pacientes.map(e => e.pacienteId));
     const candidatos = State.data.patients
       .filter(p => !p.fechaEgreso)
-      .filter(p => !(p.cirugia && p.cirugia.realizada))
       .filter(p => !yaEnPrg.has(p.id))
       .filter(p => evaluarAptoCirugia(p).listo)
       .sort((a,b) => (a.cama||'').localeCompare(b.cama||'', 'es', {numeric:true}));
@@ -1937,7 +1939,6 @@ service cloud.firestore {
     // Para informar al usuario cuántos pacientes hay pendientes (no aptos) y por qué
     const noAptos = State.data.patients
       .filter(p => !p.fechaEgreso)
-      .filter(p => !(p.cirugia && p.cirugia.realizada))
       .filter(p => !yaEnPrg.has(p.id))
       .filter(p => !evaluarAptoCirugia(p).listo).length;
 
