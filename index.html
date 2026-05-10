@@ -624,7 +624,6 @@
   <button data-tab="salidas" onclick="App.switchTab('salidas')">Salida</button>
   <button data-tab="reportes" onclick="App.switchTab('reportes')">Reportes</button>
   <button data-tab="alertas" onclick="App.switchTab('alertas')">Alertas <span class="badge" id="alertCount" style="display:none">0</span></button>
-  <button data-tab="todos" onclick="App.switchTab('todos')">Todos</button>
 </nav>
 
 <main>
@@ -640,7 +639,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.13-archivado-egresados-2026-05-10';
+const APP_VERSION = 'v3.14-quitar-todos-2026-05-10';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -2838,7 +2837,6 @@ service cloud.firestore {
     else if (t === 'salidas') view.innerHTML = this.renderSalidas();
     else if (t === 'reportes') view.innerHTML = this.renderReportes();
     else if (t === 'alertas') view.innerHTML = this.renderAlertas();
-    else if (t === 'todos') view.innerHTML = this.renderLista(true);
     this.refreshAlertCount();
   },
 
@@ -3155,10 +3153,10 @@ service cloud.firestore {
     State.search = v;
     // Sólo actualizar la lista, no la casilla de búsqueda — así el input no
     // pierde el foco del teclado al escribir cada letra.
-    if (State.currentTab === 'lista' || State.currentTab === 'todos') {
+    if (State.currentTab === 'lista') {
       const container = document.getElementById('patientListContainer');
       if (container) {
-        container.innerHTML = this.renderPatientListContent(State.currentTab === 'todos');
+        container.innerHTML = this.renderPatientListContent(false);
         return;
       }
     }
