@@ -3052,6 +3052,7 @@ service cloud.firestore {
         ${this._chip('listos','Listos cirugía',counts.listos)}
         ${this._chip('postop','Postoperatorios',counts.postop)}
         ${this._chip('infeccion','Con infección',counts.infeccion)}
+        ${this._chip('preopPend','⏳ Preop con pendientes',counts.preopPend)}
         ${this._chip('hoy','Cirugía hoy',counts.hoy)}
         ${this._chip('sinprog','Sin programar',counts.sinprog)}
         ${this._chip('misPacientes','Mis pacientes',counts.misPacientes)}
@@ -3122,6 +3123,10 @@ service cloud.firestore {
       listos: base.filter(p => evaluarAptoCirugia(p).listo).length,
       postop: base.filter(p => p.cirugia && p.cirugia.realizada).length,
       infeccion: base.filter(p => tieneInfeccion(p)).length,
+      preopPend: baseTotal.filter(p => {
+        const ep = getEvalPreop(p);
+        return ep && ep.estado === 'apto_condicional' && preopPendientesFaltan(ep) > 0;
+      }).length,
       hoy: base.filter(p => idsHoy.has(p.id)).length,
       sinprog: base.filter(p => evaluarAptoCirugia(p).listo && !idsProgramados.has(p.id)).length,
       misPacientes: yo ? baseConAmbulatorios.filter(matchesMisPac).length : 0
@@ -3155,6 +3160,10 @@ service cloud.firestore {
     if (t === 'listos') return evaluarAptoCirugia(p).listo;
     if (t === 'postop') return p.cirugia && p.cirugia.realizada;
     if (t === 'infeccion') return tieneInfeccion(p);
+    if (t === 'preopPend') {
+      const ep = getEvalPreop(p);
+      return !!ep && ep.estado === 'apto_condicional' && preopPendientesFaltan(ep) > 0;
+    }
     if (t === 'hoy') {
       const programaHoy = (State.data.programas || []).find(prg => prg.fecha === todayISO());
       if (!programaHoy) return false;
