@@ -640,7 +640,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.11-pwa-voz-plantillas-calidad-2026-05-09';
+const APP_VERSION = 'v3.12-filtro-ubicacion-2026-05-09';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -2802,9 +2802,19 @@ service cloud.firestore {
 
     // Filtros rápidos (chips)
     const counts = this._countsPorFiltro(incluirEgresados);
+    // Chips de ubicaciones (uno por cada ubicación del catálogo + "sin asignar" si hay)
+    const ubicaciones = getCatalogo('ubicaciones').slice();
+    const chipsUbic = ubicaciones.map(u =>
+      this._chip('ubic:'+u, '📍 '+u, counts['ubic:'+u] || 0)
+    ).join('');
+    // "Sin ubicación" sólo si hay pacientes sin ubicación asignada
+    const chipSinUbic = counts['ubic:'] > 0
+      ? this._chip('ubic:', '📍 Sin ubicación', counts['ubic:'])
+      : '';
     const chips = `
       <div class="filter-chips no-print">
         ${this._chip('todos','Todos',counts.todos)}
+        ${chipsUbic}${chipSinUbic}
         ${this._chip('listos','Listos cirugía',counts.listos)}
         ${this._chip('postop','Postoperatorios',counts.postop)}
         ${this._chip('infeccion','Con infección',counts.infeccion)}
@@ -2857,7 +2867,7 @@ service cloud.firestore {
       });
     });
     const yo = getCurrentUser();
-    return {
+    const counts = {
       todos: base.length,
       listos: base.filter(p => evaluarAptoCirugia(p).listo).length,
       postop: base.filter(p => p.cirugia && p.cirugia.realizada).length,
@@ -2873,6 +2883,13 @@ service cloud.firestore {
         return palabrasYo.some(w => cir.includes(w));
       }).length : 0
     };
+    // Conteos por ubicación
+    base.forEach(p => {
+      const u = p.ubicacion || '';
+      const k = 'ubic:' + u;
+      counts[k] = (counts[k] || 0) + 1;
+    });
+    return counts;
   },
 
   setFilter(tipo) {
@@ -2884,6 +2901,11 @@ service cloud.firestore {
   matchesFilter(p) {
     const t = State.filterType;
     if (!t || t === 'todos') return true;
+    // Filtro por ubicación: "ubic:CIDELAS" o "ubic:" (sin ubicación)
+    if (t.startsWith('ubic:')) {
+      const objetivo = t.slice(5);
+      return (p.ubicacion || '') === objetivo;
+    }
     if (t === 'listos') return evaluarAptoCirugia(p).listo;
     if (t === 'postop') return p.cirugia && p.cirugia.realizada;
     if (t === 'infeccion') return tieneInfeccion(p);
