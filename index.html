@@ -640,7 +640,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.12-filtro-ubicacion-2026-05-09';
+const APP_VERSION = 'v3.13-archivado-egresados-2026-05-10';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -1324,6 +1324,32 @@ function diasDesdeUltimoExport() {
   return daysBetween(v.slice(0,10));
 }
 
+/* ---------- Archivado de egresados antiguos ---------- */
+const ARCHIVO_SNOOZE_KEY = 'ortopedia_archivo_snooze';
+
+// Devuelve lista de pacientes egresados con más de N meses de antigüedad
+function egresadosParaArchivar(mesesUmbral) {
+  if (!mesesUmbral || mesesUmbral < 1) return [];
+  const limite = new Date();
+  limite.setMonth(limite.getMonth() - mesesUmbral);
+  const limiteISO = limite.toISOString().slice(0,10);
+  return (State.data.patients || []).filter(p =>
+    p.fechaEgreso && p.fechaEgreso < limiteISO
+  );
+}
+
+// ¿Está pospuesto el aviso?
+function archivoEstaSnoozed() {
+  const hasta = localStorage.getItem(ARCHIVO_SNOOZE_KEY);
+  if (!hasta) return false;
+  return new Date().getTime() < parseInt(hasta, 10);
+}
+
+function snoozeArchivado(dias) {
+  const hasta = new Date().getTime() + (dias * 24 * 60 * 60 * 1000);
+  localStorage.setItem(ARCHIVO_SNOOZE_KEY, String(hasta));
+}
+
 /* ---------- Catálogos ---------- */
 function getCatalogo(nombre) {
   const cfg = getConfig();
@@ -1660,6 +1686,7 @@ const State = {
     if (cats.ubicaciones.length === 0) cats.ubicaciones = SEED_UBICACIONES.slice();
     if (cats.plantillasEvolucion.length === 0) cats.plantillasEvolucion = SEED_PLANTILLAS_EVOLUCION.slice();
     if (!data.config.jefeServicio) data.config.jefeServicio = 'Dr. Franklin Carrillo';
+    if (data.config.archivoMesesAntiguedad === undefined) data.config.archivoMesesAntiguedad = 6;
 
     data.patients.forEach(p => {
       // Defaults para nuevos campos (v3.8) — pacientes anteriores no los tenían
@@ -2154,6 +2181,35 @@ const App = {
                 <label>Dirección / referencia</label>
                 <input value="${escapeHtml((State.data.config||{}).direccion||'')}"
                   oninput="App.setHospitalConfig('direccion',this.value)">
+              </div>
+            </div>
+
+            <div class="setup-step">
+              <h3>Archivado de egresados antiguos</h3>
+              <p class="muted" style="font-size:.85rem">
+                Para evitar que la base de datos crezca indefinidamente (límite de Firebase: 1 MB),
+                la app revisa al inicio si hay egresados con más de N meses y te ofrece archivarlos
+                (exportar a JSON + eliminar). Pone 0 para desactivar el aviso.
+              </p>
+              <div class="field-row">
+                <div class="field" style="margin-bottom:0">
+                  <label>Antigüedad para archivar (meses)</label>
+                  <input type="number" min="0" max="60" value="${(State.data.config||{}).archivoMesesAntiguedad === undefined ? 6 : (State.data.config||{}).archivoMesesAntiguedad}"
+                    onchange="App.setHospitalConfig('archivoMesesAntiguedad', parseInt(this.value)||0)">
+                </div>
+                <div class="field" style="margin-bottom:0;display:flex;align-items:end">
+                  <button class="btn small" onclick="App.archivarEgresadosAntiguos()">📥 Revisar y archivar ahora</button>
+                </div>
+              </div>
+              <div class="muted" style="font-size:.8rem;margin-top:6px">
+                ${(() => {
+                  const meses = (State.data.config||{}).archivoMesesAntiguedad === undefined ? 6 : (State.data.config||{}).archivoMesesAntiguedad;
+                  if (meses === 0) return 'Aviso desactivado.';
+                  const cuantos = egresadosParaArchivar(meses).length;
+                  return cuantos > 0
+                    ? `Hay ${cuantos} paciente(s) elegibles para archivar.`
+                    : `No hay pacientes elegibles para archivar en este momento.`;
+                })()}
               </div>
             </div>
 
@@ -2799,6 +2855,20 @@ service cloud.firestore {
           <button class="btn small" style="margin-top:6px" onclick="App.exportData()">Exportar ahora</button>
         </div>`
       : '';
+    // Banner de archivado de egresados antiguos
+    const meses = (cfg.archivoMesesAntiguedad === undefined ? 6 : cfg.archivoMesesAntiguedad);
+    const archivar = (meses > 0 && !archivoEstaSnoozed()) ? egresadosParaArchivar(meses) : [];
+    const bannerArchivo = (archivar.length > 0)
+      ? `<div class="alert-box blue no-print" style="margin-bottom:12px">
+          <strong>📦 Archivado de egresados antiguos:</strong> hay <strong>${archivar.length}</strong> paciente(s) egresado(s) hace más de ${meses} mes(es).
+          Considera archivar para liberar espacio en la base de datos.
+          <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+            <button class="btn small" onclick="App.archivarEgresadosAntiguos()">📥 Exportar y eliminar</button>
+            <button class="btn ghost small" onclick="App.snoozeArchivar(7)">Recordarme en 7 días</button>
+            <button class="btn ghost small" onclick="App.snoozeArchivar(30)">Recordarme en 30 días</button>
+          </div>
+        </div>`
+      : '';
 
     // Filtros rápidos (chips)
     const counts = this._countsPorFiltro(incluirEgresados);
@@ -2826,6 +2896,7 @@ service cloud.firestore {
 
     return `
       ${banner}
+      ${bannerArchivo}
       <div class="print-only" id="printHeader">
         <div class="print-title">${hospName}Servicio de ${escapeHtml(cfg.servicio||'Ortopedia')} — ${titulo}</div>
         <div class="print-sub" id="printSub"></div>
@@ -7085,6 +7156,87 @@ service cloud.firestore {
   },
 
   /* ---------- Export / Import ---------- */
+  /* ---------- Archivado de egresados antiguos ---------- */
+  snoozeArchivar(dias) {
+    snoozeArchivado(dias);
+    this.render();
+  },
+
+  archivarEgresadosAntiguos() {
+    const cfg = getConfig();
+    const meses = cfg.archivoMesesAntiguedad === undefined ? 6 : cfg.archivoMesesAntiguedad;
+    const aArchivar = egresadosParaArchivar(meses);
+    if (aArchivar.length === 0) {
+      alert('No hay egresados con más de ' + meses + ' meses para archivar.');
+      return;
+    }
+    const idsAArchivar = new Set(aArchivar.map(p => p.id));
+    const egresosAsoc = (State.data.egresos || []).filter(eg => idsAArchivar.has(eg.pacienteId));
+
+    // Mostrar confirmación con detalles
+    const fechaMin = aArchivar.reduce((m,p) => p.fechaEgreso < m ? p.fechaEgreso : m, aArchivar[0].fechaEgreso);
+    const fechaMax = aArchivar.reduce((m,p) => p.fechaEgreso > m ? p.fechaEgreso : m, aArchivar[0].fechaEgreso);
+    const ok = confirm(
+      'ARCHIVAR EGRESADOS ANTIGUOS\\n\\n' +
+      'Se exportará un archivo JSON con:\\n' +
+      '  • ' + aArchivar.length + ' paciente(s) egresado(s)\\n' +
+      '  • ' + egresosAsoc.length + ' reporte(s) de egreso\\n' +
+      '  • Egresos entre: ' + fechaMin + ' y ' + fechaMax + '\\n\\n' +
+      'DESPUÉS de exportar, estos pacientes se ELIMINARÁN de la base de datos activa.\\n' +
+      'Quedarán SOLO en el archivo JSON descargado.\\n\\n' +
+      'Para recuperarlos en el futuro, importa el JSON desde el botón "Importar".\\n\\n' +
+      '¿Proceder con el archivado?'
+    );
+    if (!ok) return;
+
+    // Generar archivo JSON con la información de los archivados
+    const archivo = {
+      tipo: 'archivo_egresados_ortopedia',
+      version: APP_VERSION,
+      fecha_archivado: new Date().toISOString(),
+      criterio: `Egresados de hace más de ${meses} mes(es)`,
+      pacientes: aArchivar,
+      egresos: egresosAsoc,
+      // Cirugías y referencias adicionales por contexto
+      programas_relacionados: (State.data.programas || []).filter(prg =>
+        prg.pacientes && prg.pacientes.some(e => idsAArchivar.has(e.pacienteId))
+      ).map(prg => ({
+        ...prg,
+        pacientes: prg.pacientes.filter(e => idsAArchivar.has(e.pacienteId))
+      }))
+    };
+
+    const blob = new Blob([JSON.stringify(archivo, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ortopedia_archivo_egresados_${todayISO()}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+
+    // Eliminar pacientes y egresos de la base activa
+    State.data.patients = State.data.patients.filter(p => !idsAArchivar.has(p.id));
+    State.data.egresos = (State.data.egresos || []).filter(eg => !idsAArchivar.has(eg.pacienteId));
+    // Limpiar entradas de programas viejos asociados a esos pacientes (opcional pero aliviana)
+    (State.data.programas || []).forEach(prg => {
+      if (prg.pacientes) {
+        prg.pacientes = prg.pacientes.filter(e => !idsAArchivar.has(e.pacienteId));
+      }
+    });
+    // Eliminar programas que quedaron vacíos
+    State.data.programas = (State.data.programas || []).filter(prg => prg.pacientes && prg.pacientes.length > 0);
+
+    State.save();
+    // Limpiar snooze para que pueda volver a aparecer cuando haya más viejos
+    localStorage.removeItem(ARCHIVO_SNOOZE_KEY);
+
+    alert('✓ ' + aArchivar.length + ' paciente(s) archivado(s).\\n\\n' +
+      'Archivo descargado: ortopedia_archivo_egresados_' + todayISO() + '.json\\n\\n' +
+      'Guárdalo en lugar seguro (Drive, USB, correo). Si necesitas recuperar a algún paciente, ' +
+      'usa "Importar" con este archivo.');
+    this.render();
+  },
+
   exportData() {
     const blob = new Blob([JSON.stringify(State.data, null, 2)], { type:'application/json' });
     const url = URL.createObjectURL(blob);
