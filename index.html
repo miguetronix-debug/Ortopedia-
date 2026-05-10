@@ -619,7 +619,6 @@
   <button data-tab="lista" class="active" onclick="App.switchTab('lista')">Pase de visita</button>
   <button data-tab="resumen" onclick="App.switchTab('resumen')">Pendientes <span class="badge" id="resumenCount" style="display:none">0</span></button>
   <button data-tab="cirugia" onclick="App.switchTab('cirugia')">Listos para cirugía</button>
-  <button data-tab="lespera" onclick="App.switchTab('lespera')">Ambulatorios <span class="badge" id="lesperaCount" style="display:none">0</span></button>
   <button data-tab="programa" onclick="App.switchTab('programa')">Programa Qx</button>
   <button data-tab="icrecibidas" onclick="App.switchTab('icrecibidas')">IC Recibidas <span class="badge" id="icRecCount" style="display:none">0</span></button>
   <button data-tab="salidas" onclick="App.switchTab('salidas')">Salida</button>
@@ -640,7 +639,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.17-tag-programado-2026-05-10';
+const APP_VERSION = 'v3.19-unificar-ambulatorios-2026-05-10';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -2828,17 +2827,6 @@ service cloud.firestore {
         icBadge.style.display = 'none';
       }
     }
-    // Badge de Ambulatorios: cuántos están en lista
-    const enLEspera = State.data.patients.filter(p => p.enListaEspera && !p.fechaEgreso).length;
-    const lesperaBadge = document.getElementById('lesperaCount');
-    if (lesperaBadge) {
-      if (enLEspera > 0) {
-        lesperaBadge.style.display = 'inline-block';
-        lesperaBadge.textContent = enLEspera;
-      } else {
-        lesperaBadge.style.display = 'none';
-      }
-    }
     // Badge de Resumen: cantidad de pacientes con pendientes
     const conPend = State.data.patients.filter(p => !p.fechaEgreso)
       .filter(p => calcularPendientesPaciente(p).length > 0).length;
@@ -2867,7 +2855,6 @@ service cloud.firestore {
     if (t === 'lista') view.innerHTML = this.renderLista(false);
     else if (t === 'resumen') view.innerHTML = this.renderResumen();
     else if (t === 'cirugia') view.innerHTML = this.renderCirugia();
-    else if (t === 'lespera') view.innerHTML = this.renderListaEspera();
     else if (t === 'programa') view.innerHTML = this.renderPrograma();
     else if (t === 'icrecibidas') view.innerHTML = this.renderICRecibidas();
     else if (t === 'salidas') view.innerHTML = this.renderSalidas();
@@ -2909,16 +2896,18 @@ service cloud.firestore {
     // Chips de ubicaciones (uno por cada ubicación del catálogo + "sin asignar" si hay)
     const ubicaciones = getCatalogo('ubicaciones').slice();
     const chipsUbic = ubicaciones.map(u =>
-      this._chip('ubic:'+u, '📍 '+u, counts['ubic:'+u] || 0)
+      this._chip('ubic:'+u, '🏥 '+u, counts['ubic:'+u] || 0)
     ).join('');
-    // "Sin ubicación" sólo si hay pacientes sin ubicación asignada
+    // Chip "Sin ubicación" sólo si hay pacientes hospitalizados sin ubicación
     const chipSinUbic = counts['ubic:'] > 0
-      ? this._chip('ubic:', '📍 Sin ubicación', counts['ubic:'])
+      ? this._chip('ubic:', '🏥 Sin ubicación', counts['ubic:'])
       : '';
+    // Chip Ambulatorios (siempre presente, junto a las ubicaciones)
+    const chipAmb = this._chip('amb', '🚶 Ambulatorios', counts.amb || 0);
     const chips = `
       <div class="filter-chips no-print">
         ${this._chip('todos','Todos',counts.todos)}
-        ${chipsUbic}${chipSinUbic}
+        ${chipsUbic}${chipSinUbic}${chipAmb}
         ${this._chip('listos','Listos cirugía',counts.listos)}
         ${this._chip('postop','Postoperatorios',counts.postop)}
         ${this._chip('infeccion','Con infección',counts.infeccion)}
@@ -2961,9 +2950,10 @@ service cloud.firestore {
   },
 
   _countsPorFiltro(incluirEgresados) {
-    const base = State.data.patients
-      .filter(p => !p.enListaEspera)
-      .filter(p => incluirEgresados || !p.fechaEgreso);
+    // base ahora incluye TODOS (hospitalizados + ambulatorios) activos
+    const baseTotal = State.data.patients.filter(p => incluirEgresados || !p.fechaEgreso);
+    // Para algunos chips (ubicación, listos, etc.) solo cuentan hospitalizados
+    const base = baseTotal.filter(p => !p.enListaEspera);
     const hoy = todayISO();
     const programaHoy = (State.data.programas || []).find(prg => prg.fecha === hoy);
     const idsHoy = new Set(programaHoy ? programaHoy.pacientes.map(e => e.pacienteId) : []);
@@ -2974,23 +2964,28 @@ service cloud.firestore {
       });
     });
     const yo = getCurrentUser();
+    // Para "misPacientes" usamos una base ampliada que incluye ambulatorios
+    const baseConAmbulatorios = State.data.patients
+      .filter(p => incluirEgresados || !p.fechaEgreso);
+    const matchesMisPac = (p) => {
+      const cir = (p.cirujano||'').toLowerCase();
+      if (!cir) return false;
+      const prefijos = ['dr','dra','dr.','dra.','doctor','doctora','lic','lic.','sra','sra.','sr','sr.'];
+      const palabrasYo = (yo||'').toLowerCase().split(/\s+/).filter(w => w.length > 2 && !prefijos.includes(w));
+      if (palabrasYo.length === 0) return false;
+      return palabrasYo.some(w => cir.includes(w));
+    };
     const counts = {
-      todos: base.length,
+      todos: baseTotal.length,
+      amb: baseTotal.filter(p => p.enListaEspera).length,
       listos: base.filter(p => evaluarAptoCirugia(p).listo).length,
       postop: base.filter(p => p.cirugia && p.cirugia.realizada).length,
       infeccion: base.filter(p => tieneInfeccion(p)).length,
       hoy: base.filter(p => idsHoy.has(p.id)).length,
       sinprog: base.filter(p => evaluarAptoCirugia(p).listo && !idsProgramados.has(p.id)).length,
-      misPacientes: yo ? base.filter(p => {
-        const cir = (p.cirujano||'').toLowerCase();
-        if (!cir) return false;
-        const prefijos = ['dr','dra','dr.','dra.','doctor','doctora','lic','lic.','sra','sra.','sr','sr.'];
-        const palabrasYo = yo.toLowerCase().split(/\s+/).filter(w => w.length > 2 && !prefijos.includes(w));
-        if (palabrasYo.length === 0) return false;
-        return palabrasYo.some(w => cir.includes(w));
-      }).length : 0
+      misPacientes: yo ? baseConAmbulatorios.filter(matchesMisPac).length : 0
     };
-    // Conteos por ubicación
+    // Conteos por ubicación (solo hospitalizados)
     base.forEach(p => {
       const u = p.ubicacion || '';
       const k = 'ubic:' + u;
@@ -3008,8 +3003,11 @@ service cloud.firestore {
   matchesFilter(p) {
     const t = State.filterType;
     if (!t || t === 'todos') return true;
-    // Filtro por ubicación: "ubic:CIDELAS" o "ubic:" (sin ubicación)
+    // Ambulatorios: solo los enListaEspera
+    if (t === 'amb') return !!p.enListaEspera;
+    // Filtro por ubicación: solo hospitalizados con esa ubicación
     if (t.startsWith('ubic:')) {
+      if (p.enListaEspera) return false;  // ambulatorios NO calzan con ubicaciones de hospital
       const objetivo = t.slice(5);
       return (p.ubicacion || '') === objetivo;
     }
@@ -3044,12 +3042,23 @@ service cloud.firestore {
   // Sólo el contenido de la lista — sin la casilla de búsqueda. Se re-renderiza al filtrar
   // sin destruir el input y por lo tanto sin perder el foco del teclado.
   renderPatientListContent(incluirEgresados) {
+    // Pase de visita unificado: ahora incluye TODOS los pacientes activos
+    // (hospitalizados + ambulatorios). Se diferencian visualmente y se filtran por chips.
     const pacientes = State.data.patients
-      .filter(p => !p.enListaEspera)  // los ambulatorios en espera tienen su propia pestaña
       .filter(p => incluirEgresados || !p.fechaEgreso)
       .filter(p => this.matchesFilter(p))
       .filter(p => this.matchesSearch(p))
-      .sort((a,b) => this._compararPacientes(a,b));
+      .sort((a,b) => {
+        // Si el filtro activo es "amb", ordenar por prioridad (alta primero) y antigüedad
+        if (State.filterType === 'amb') {
+          const pri = { alta:0, normal:1, baja:2 };
+          const pa = pri[a.prioridadListaEspera||'normal'];
+          const pb = pri[b.prioridadListaEspera||'normal'];
+          if (pa !== pb) return pa - pb;
+          return (a.fechaListaEspera||'').localeCompare(b.fechaListaEspera||'');
+        }
+        return this._compararPacientes(a,b);
+      });
 
     if (pacientes.length === 0) {
       const sinFiltro = !State.search;
@@ -3128,6 +3137,7 @@ service cloud.firestore {
       estadoTag = '<span class="tag red">Pendiente</span>';
     }
     const tagsHtml = [
+      p.enListaEspera ? '<span class="tag blue">🚶 Ambulatorio</span>' : '',
       estadoTag,
       tieneInfeccion(p) ? '<span class="tag yellow">Infección</span>' : '',
       p.fechaEgreso ? '<span class="tag gray">Egresado</span>' : ''
@@ -3136,11 +3146,14 @@ service cloud.firestore {
     return `
       <div class="${cls}" onclick="App.openPaciente('${p.id}')">
         <div class="pc-row">
-          <div class="pc-bed">${escapeHtml(p.cama||'?')}</div>
+          <div class="pc-bed">${p.enListaEspera ? '🚶' : escapeHtml(p.cama||'?')}</div>
           <div class="pc-info">
             <div class="pc-name">${escapeHtml(p.nombre || '(sin nombre)')}</div>
             <div class="pc-meta">
-              ${escapeHtml(p.cedula||'—')} · ${escapeHtml(p.edad||'?')} años · ${dias} día(s) hosp.
+              ${escapeHtml(p.cedula||'—')} · ${escapeHtml(p.edad||'?')} años
+              ${p.enListaEspera
+                ? (p.fechaListaEspera ? ' · En lista hace '+daysBetween(p.fechaListaEspera)+' día(s)' : '')
+                : ' · '+dias+' día(s) hosp.'}
               ${p.cirujano? ' · Cir: '+escapeHtml(p.cirujano):''}
             </div>
             <div class="pc-meta" style="margin-top:4px">
