@@ -7,21 +7,68 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
+<!-- PWA: instalable en iPhone/Android -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Ortopedia">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Crect width=%22100%22 height=%22100%22 rx=%2218%22 fill=%22%230f4c75%22/%3E%3Ctext x=%2250%22 y=%2272%22 text-anchor=%22middle%22 fill=%22white%22 font-size=%2266%22 font-family=%22Helvetica,Arial,sans-serif%22 font-weight=%22700%22%3EO%3C/text%3E%3C/svg%3E">
+<link rel="apple-touch-icon" href="data:image/svg+xml;utf8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 180 180%22%3E%3Crect width=%22180%22 height=%22180%22 rx=%2232%22 fill=%22%230f4c75%22/%3E%3Ctext x=%2290%22 y=%22128%22 text-anchor=%22middle%22 fill=%22white%22 font-size=%22118%22 font-family=%22Helvetica,Arial,sans-serif%22 font-weight=%22700%22%3EO%3C/text%3E%3C/svg%3E">
+<link rel="manifest" href='data:application/manifest+json;charset=utf-8,{"name":"Control de Pacientes - Ortopedia","short_name":"Ortopedia","description":"Sistema de control de pacientes hospitalizados del servicio de Ortopedia","start_url":".","display":"standalone","orientation":"any","background_color":"%230f4c75","theme_color":"%230f4c75","icons":[{"src":"data:image/svg+xml;utf8,%3Csvg xmlns=%5C%22http://www.w3.org/2000/svg%5C%22 viewBox=%5C%220 0 512 512%5C%22%3E%3Crect width=%5C%22512%5C%22 height=%5C%22512%5C%22 rx=%5C%2290%5C%22 fill=%5C%22%230f4c75%5C%22/%3E%3Ctext x=%5C%22256%5C%22 y=%5C%22360%5C%22 text-anchor=%5C%22middle%5C%22 fill=%5C%22white%5C%22 font-size=%5C%22340%5C%22 font-family=%5C%22Helvetica,Arial,sans-serif%5C%22 font-weight=%5C%22700%5C%22%3EO%3C/text%3E%3C/svg%3E","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]}'>
 <title>Control de Pacientes - Servicio de Ortopedia</title>
 <!-- Firebase SDK (versión compat — más estable en Safari/iOS) -->
 <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js"></script>
 <style>
   /* ---------- Reset & base ---------- */
+  :root {
+    --bg: #f3f5f8;
+    --card: #ffffff;
+    --card-alt: #f9fafb;
+    --text: #1f2937;
+    --text-soft: #374151;
+    --muted: #6b7280;
+    --border: #d1d5db;
+    --border-soft: #e5e7eb;
+    --accent: #0f4c75;
+    --accent-grad: linear-gradient(135deg, #0f4c75, #3282b8);
+    --input-bg: #ffffff;
+    --shadow: rgba(0,0,0,.06);
+    --shadow-strong: rgba(0,0,0,.12);
+    --hover: #eef2f7;
+    --hover-strong: #e5e7eb;
+    --th-bg: #f1f5f9;
+    --pre-text: #475569;
+  }
+  body.dark {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --card-alt: #273449;
+    --text: #e2e8f0;
+    --text-soft: #cbd5e1;
+    --muted: #94a3b8;
+    --border: #475569;
+    --border-soft: #334155;
+    --accent: #3b82f6;
+    --accent-grad: linear-gradient(135deg, #1e3a8a, #3b82f6);
+    --input-bg: #0f172a;
+    --shadow: rgba(0,0,0,.4);
+    --shadow-strong: rgba(0,0,0,.5);
+    --hover: #334155;
+    --hover-strong: #475569;
+    --th-bg: #273449;
+    --pre-text: #cbd5e1;
+  }
   *, *::before, *::after { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    background: #f3f5f8;
-    color: #1f2937;
+    background: var(--bg);
+    color: var(--text);
     font-size: 15px;
     line-height: 1.45;
     -webkit-font-smoothing: antialiased;
+    transition: background .2s, color .2s;
   }
   h1, h2, h3, h4 { margin: 0 0 .5em; line-height: 1.2; }
   h1 { font-size: 1.25rem; }
@@ -315,6 +362,55 @@
     .pc-bed { width: 38px; height: 38px; font-size: .9rem; }
   }
 
+  /* ---------- Dark mode overrides ---------- */
+  body.dark .card { background: var(--card); box-shadow: 0 1px 3px var(--shadow); color: var(--text); }
+  body.dark .card.compact { background: var(--card-alt); }
+  body.dark input, body.dark select, body.dark textarea {
+    background: var(--input-bg); color: var(--text); border-color: var(--border);
+  }
+  body.dark input:focus, body.dark select:focus, body.dark textarea:focus {
+    box-shadow: 0 0 0 3px rgba(59,130,246,.25);
+  }
+  body.dark label { color: var(--text-soft); }
+  body.dark .muted { color: var(--muted); }
+  body.dark h2, body.dark h3 { color: #93c5fd; }
+  body.dark h4 { color: var(--text-soft); }
+  body.dark a { color: #93c5fd; }
+  body.dark .patient-card { background: var(--card); box-shadow: 0 1px 3px var(--shadow); }
+  body.dark .patient-card.alert { background: #4a1a1a; }
+  body.dark .patient-card.warn { border-left-color: #f59e0b; }
+  body.dark .modal { background: var(--bg); }
+  body.dark .modal-foot { background: var(--card); border-top-color: var(--border-soft); }
+  body.dark .subtabs { background: var(--card); border-bottom-color: var(--border-soft); }
+  body.dark .subtabs button { color: var(--muted); }
+  body.dark .subtabs button.active { color: #93c5fd; border-bottom-color: #93c5fd; }
+  body.dark table thead { background: var(--th-bg); }
+  body.dark table th { color: var(--text-soft); }
+  body.dark table th, body.dark table td { border-bottom-color: var(--border-soft); }
+  body.dark .alert-box.blue { background: #1e3a5f; color: #93c5fd; }
+  body.dark .alert-box.yellow { background: #4a3c1a; color: #fbbf24; }
+  body.dark .alert-box.red { background: #4a1a1a; color: #fca5a5; }
+  body.dark .alert-box.green { background: #1a4a2f; color: #86efac; }
+  body.dark .tag.gray { background: #475569; color: #cbd5e1; }
+  body.dark .btn.ghost { background: transparent; color: #93c5fd; border-color: var(--border); }
+  body.dark .btn.ghost:hover { background: var(--hover); }
+  body.dark .chip { background: var(--card); color: var(--text-soft); border-color: var(--border); }
+  body.dark .chip:hover { border-color: #3b82f6; color: #93c5fd; }
+  body.dark .chip.active { background: var(--accent); color: white; border-color: var(--accent); }
+  body.dark .filter-chips .chip .count { background: rgba(255,255,255,.1); }
+  body.dark .kpi { background: var(--card); }
+  body.dark .kpi .kpi-value { color: #93c5fd; }
+  body.dark .catalog-item { background: var(--card-alt); color: var(--text); }
+  body.dark .catalog-item:hover { background: var(--hover-strong); }
+  body.dark .catalog-item.selected { background: #1a4a2f; border-color: #059669; }
+  body.dark .bar-row .bar-track { background: var(--border-soft); }
+  body.dark .vbar-fill { background: var(--accent); }
+  body.dark .empty { color: var(--muted); }
+  body.dark hr { border-top-color: var(--border-soft); }
+  body.dark .code-block { background: #020617; }
+  body.dark .setup-step { background: var(--card); }
+  body.dark .setup-step h3 { color: #93c5fd; }
+
   /* ---------- Filter chips ---------- */
   .filter-chips {
     display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;
@@ -350,6 +446,30 @@
   }
   .catalog-item:hover { background: #cbd5e1; }
   .catalog-item.selected { background: #d1fae5; border: 1px solid #059669; }
+
+  /* Botón de dictado por voz */
+  .dict-wrap { position: relative; }
+  .dict-btn {
+    position: absolute; right: 6px; bottom: 6px;
+    background: rgba(255,255,255,.9); border: 1px solid var(--border);
+    border-radius: 50%;
+    width: 32px; height: 32px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1rem; cursor: pointer;
+    z-index: 2;
+    transition: all .15s;
+  }
+  .dict-btn:hover { background: white; transform: scale(1.05); }
+  .dict-btn.grabando {
+    background: #dc2626; color: white; border-color: #dc2626;
+    animation: pulseRec 1.2s ease-in-out infinite;
+  }
+  body.dark .dict-btn { background: var(--card); color: var(--text); }
+  body.dark .dict-btn:hover { background: var(--hover); }
+  @keyframes pulseRec {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, .5); }
+    50% { box-shadow: 0 0 0 8px rgba(220, 38, 38, 0); }
+  }
 
   /* Reportes */
   .kpi-grid {
@@ -488,6 +608,7 @@
       <button class="btn small" onclick="App.openNew()">+ Paciente</button>
       <button class="btn ghost small" onclick="App.exportData()">Exportar</button>
       <button class="btn ghost small" onclick="document.getElementById('importFile').click()">Importar</button>
+      <button class="btn ghost small" id="themeToggle" onclick="App.toggleTheme()" title="Modo oscuro / claro">🌙</button>
       <button class="btn ghost small" onclick="App.openSetup()">⚙</button>
       <input type="file" id="importFile" accept="application/json" style="display:none" onchange="App.importData(event)">
     </div>
@@ -496,7 +617,7 @@
 
 <nav class="tabs no-print" id="tabs">
   <button data-tab="lista" class="active" onclick="App.switchTab('lista')">Pase de visita</button>
-  <button data-tab="resumen" onclick="App.switchTab('resumen')">Resumen <span class="badge" id="resumenCount" style="display:none">0</span></button>
+  <button data-tab="resumen" onclick="App.switchTab('resumen')">Pendientes <span class="badge" id="resumenCount" style="display:none">0</span></button>
   <button data-tab="cirugia" onclick="App.switchTab('cirugia')">Listos para cirugía</button>
   <button data-tab="programa" onclick="App.switchTab('programa')">Programa Qx</button>
   <button data-tab="icrecibidas" onclick="App.switchTab('icrecibidas')">IC Recibidas <span class="badge" id="icRecCount" style="display:none">0</span></button>
@@ -519,7 +640,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.9-fix-orden-dih-2026-05-09';
+const APP_VERSION = 'v3.11-pwa-voz-plantillas-calidad-2026-05-09';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -680,6 +801,18 @@ const SEED_ESQUEMAS_EGRESO = [
 ];
 
 const SEED_UBICACIONES = ['CIDELAS', 'CHDRAAM'];
+
+const SEED_PLANTILLAS_EVOLUCION = [
+  'Paciente estable, sin dolor referido. Examen físico sin cambios. Plan: continuar manejo actual.',
+  'Paciente con dolor moderado, controlado con analgesia. Sin signos de alarma. Plan: ajustar analgesia.',
+  'Se realizó curación de herida quirúrgica. Sin signos de infección. Herida limpia con cicatrización adecuada.',
+  'Paciente afebril, hemodinámicamente estable. Sin nuevos hallazgos. Plan: continuar.',
+  'Postoperatorio inmediato. Evolución satisfactoria. Sin complicaciones. Plan: movilización progresiva.',
+  'Paciente pendiente de cirugía. Estudios preoperatorios en curso. Plan: completar estudios y reevaluar.',
+  'Paciente con buena evolución postoperatoria, herida sin signos de infección, dolor controlado. Plan: continuar manejo y planear egreso.',
+  'Se evaluó por fisioterapia / rehabilitación. Inicia plan de rehabilitación. Plan: continuar fisioterapia.',
+  'Sin nuevos hallazgos en el día. Pendiente resultado de estudios solicitados.'
+];
 
 const SEED_CIRUJANOS = [
   'Dr. Enrique Espinosa', 'Dra. Karla Vargas', 'Dr. Michael Kushner',
@@ -945,6 +1078,7 @@ function nuevoEgreso(pacienteId) {
     citaControl: { fecha:'', lugar:'', especialidad:'Ortopedia', notas:'' },
     rayosXControl: { requiere:false, descripcion:'' },
     recomendaciones: '',
+    verificadoStaff: { confirmado:false, staffNombre:'', fecha:'', notas:'' },  // visto bueno antes del alta
     creado: new Date().toISOString(),
     modificado: new Date().toISOString()
   };
@@ -1198,6 +1332,96 @@ function getCatalogo(nombre) {
   return cfg.catalogos[nombre];
 }
 
+/* ---------- Helper: envuelve un textarea con botón de dictado por voz ---------- */
+// Uso: dictArea({ id, rows, placeholder, oninput, value })
+function dictArea(opts) {
+  const id = opts.id;
+  const btnId = 'btn_' + id;
+  const rows = opts.rows || 3;
+  const oninput = opts.oninput || '';
+  const onchange = opts.onchange || '';
+  const placeholder = opts.placeholder || '';
+  const value = opts.value || '';
+  return `<div class="dict-wrap">
+    <textarea id="${id}" rows="${rows}" placeholder="${placeholder}"
+      ${oninput?'oninput="'+oninput+'"':''}
+      ${onchange?'onchange="'+onchange+'"':''}>${value}</textarea>
+    <button type="button" class="dict-btn" id="${btnId}" title="Dictar por voz"
+      onclick="Voz.alternar('${id}','${btnId}')">🎙</button>
+  </div>`;
+}
+
+/* ---------- Dictado por voz (Web Speech API) ---------- */
+const Voz = {
+  recognition: null,
+  targetEl: null,
+  btnEl: null,
+  soportado() {
+    return typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition);
+  },
+  alternar(targetId, btnId) {
+    if (!this.soportado()) {
+      alert('El dictado por voz no está disponible en este navegador. Funciona mejor en Chrome o Safari moderno.');
+      return;
+    }
+    if (this.recognition && this.targetEl && this.targetEl.id === targetId) {
+      this.detener();
+      return;
+    }
+    this.iniciar(targetId, btnId);
+  },
+  iniciar(targetId, btnId) {
+    this.detener();
+    const target = document.getElementById(targetId);
+    if (!target) return;
+    const btn = document.getElementById(btnId);
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const rec = new SR();
+    rec.lang = 'es-ES';
+    rec.continuous = true;
+    rec.interimResults = false;
+    rec.onresult = (e) => {
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const txt = e.results[i][0].transcript.trim();
+        const sep = (target.value && !/\s$/.test(target.value)) ? ' ' : '';
+        target.value += sep + txt;
+        target.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    };
+    rec.onerror = (e) => {
+      console.warn('Speech error:', e.error);
+      this.detener();
+    };
+    rec.onend = () => {
+      // Si terminó por timeout, detener visualmente
+      if (this.recognition === rec) this.detener();
+    };
+    this.recognition = rec;
+    this.targetEl = target;
+    this.btnEl = btn;
+    if (btn) {
+      btn.textContent = '⏹';
+      btn.classList.add('grabando');
+      btn.title = 'Detener dictado';
+    }
+    try { rec.start(); }
+    catch(e) { console.warn(e); this.detener(); }
+  },
+  detener() {
+    if (this.recognition) {
+      try { this.recognition.stop(); } catch(e) {}
+      this.recognition = null;
+    }
+    if (this.btnEl) {
+      this.btnEl.textContent = '🎙';
+      this.btnEl.classList.remove('grabando');
+      this.btnEl.title = 'Dictar por voz';
+    }
+    this.targetEl = null;
+    this.btnEl = null;
+  }
+};
+
 /* ---------- Debounce para botones críticos ---------- */
 const _debounceLocks = new Set();
 function debounceAction(key, fn) {
@@ -1386,6 +1610,9 @@ const State = {
   filterType: 'todos',  // todos | listos | postop | infeccion | hoy | sinprog | misPacientes
   sortBy: 'cama',       // cama | dih
   sortDir: 'asc',       // asc | desc
+  // Rango de fechas para Reportes
+  reporteDesde: '',     // YYYY-MM-DD vacío = sin filtro inferior
+  reporteHasta: '',     // YYYY-MM-DD vacío = sin filtro superior
   load() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -1416,6 +1643,7 @@ const State = {
     if (!cats.esquemasEgreso) cats.esquemasEgreso = [];
     if (!cats.cirujanos) cats.cirujanos = [];
     if (!cats.ubicaciones) cats.ubicaciones = [];
+    if (!cats.plantillasEvolucion) cats.plantillasEvolucion = [];
     // Sembrar con valores por defecto si nunca se sembraron en este servidor.
     // El flag _seeded evita re-sembrar si el usuario borró ítems intencionalmente.
     if (!data.config._seeded) {
@@ -1425,10 +1653,12 @@ const State = {
       if (cats.esquemasEgreso.length === 0) cats.esquemasEgreso = SEED_ESQUEMAS_EGRESO.map(e => ({...e}));
       if (cats.cirujanos.length === 0) cats.cirujanos = SEED_CIRUJANOS.slice();
       if (cats.ubicaciones.length === 0) cats.ubicaciones = SEED_UBICACIONES.slice();
+      if (cats.plantillasEvolucion.length === 0) cats.plantillasEvolucion = SEED_PLANTILLAS_EVOLUCION.slice();
       data.config._seeded = true;
     }
-    // Para usuarios que ya estaban en el sistema sin ubicaciones, sembrarlas si vacío
+    // Para usuarios que ya estaban en el sistema sin ubicaciones/plantillas, sembrarlas si vacío
     if (cats.ubicaciones.length === 0) cats.ubicaciones = SEED_UBICACIONES.slice();
+    if (cats.plantillasEvolucion.length === 0) cats.plantillasEvolucion = SEED_PLANTILLAS_EVOLUCION.slice();
     if (!data.config.jefeServicio) data.config.jefeServicio = 'Dr. Franklin Carrillo';
 
     data.patients.forEach(p => {
@@ -1654,6 +1884,9 @@ const App = {
     const v = document.getElementById('appVersionLabel');
     if (v) v.textContent = APP_VERSION;
 
+    // Aplicar tema guardado (modo oscuro)
+    this._aplicarTema();
+
     State.load();
     this._refreshUserBadge();
     this.switchTab('lista');
@@ -1669,6 +1902,19 @@ const App = {
       // Esperar 600ms para no chocar con el alert de sincronización
       setTimeout(() => this.openIdentificarse(true), 600);
     }
+  },
+
+  _aplicarTema() {
+    const theme = localStorage.getItem('ortopedia_theme') || 'light';
+    document.body.classList.toggle('dark', theme === 'dark');
+    const btn = document.getElementById('themeToggle');
+    if (btn) btn.textContent = theme === 'dark' ? '☀' : '🌙';
+  },
+  toggleTheme() {
+    const actual = localStorage.getItem('ortopedia_theme') || 'light';
+    const nuevo = actual === 'dark' ? 'light' : 'dark';
+    localStorage.setItem('ortopedia_theme', nuevo);
+    this._aplicarTema();
   },
 
   _refreshUserBadge() {
@@ -3622,12 +3868,12 @@ service cloud.firestore {
 
     let html = `
       <div class="print-only">
-        <div class="print-title">${hospName}Resumen / Pase de guardia</div>
+        <div class="print-title">${hospName}Pendientes / Pase de guardia</div>
         <div class="print-sub">${new Date().toLocaleString('es')} · ${activos.length} pacientes activos · ${totalPendientes} pendientes</div>
       </div>
 
       <div class="toolbar no-print">
-        <h2 style="margin:0">Resumen del servicio</h2>
+        <h2 style="margin:0">Pendientes del servicio</h2>
         <div style="flex:1"></div>
         <button class="btn ghost small" onclick="window.print()">🖨 Imprimir pase de guardia</button>
       </div>
@@ -4015,8 +4261,13 @@ service cloud.firestore {
         <h3>Motivo de la interconsulta</h3>
         <div class="field" style="margin-bottom:0">
           <label>Pregunta clínica / motivo *</label>
-          <textarea rows="3" placeholder="Ej. Paciente con fractura tibial, evaluar manejo quirúrgico vs conservador"
-            oninput="App.setICEntrante('${ic.id}','motivo',this.value)">${escapeHtml(ic.motivo||'')}</textarea>
+          ${dictArea({
+            id: 'ic-mot-'+ic.id,
+            rows: 3,
+            placeholder: 'Ej. Paciente con fractura tibial, evaluar manejo quirúrgico vs conservador',
+            oninput: "App.setICEntrante('"+ic.id+"','motivo',this.value)",
+            value: escapeHtml(ic.motivo||'')
+          })}
         </div>
         <div class="field" style="margin-top:8px;margin-bottom:0">
           <label>Diagnóstico presuntivo</label>
@@ -4055,16 +4306,22 @@ service cloud.firestore {
         </div>
         <div class="field" style="margin-top:8px;margin-bottom:0">
           <label>Respuesta clínica / impresión diagnóstica</label>
-          <textarea rows="4" class="no-print"
-            placeholder="Hallazgos al examen físico, impresión diagnóstica, conducta sugerida..."
-            oninput="App.setICEntrante('${ic.id}','respuesta',this.value)">${escapeHtml(ic.respuesta||'')}</textarea>
+          <div class="no-print">${dictArea({
+            id: 'ic-resp-'+ic.id, rows: 4,
+            placeholder: 'Hallazgos al examen físico, impresión diagnóstica, conducta sugerida...',
+            oninput: "App.setICEntrante('"+ic.id+"','respuesta',this.value)",
+            value: escapeHtml(ic.respuesta||'')
+          })}</div>
           <div class="print-only" style="white-space:pre-wrap">${escapeHtml(ic.respuesta||'—')}</div>
         </div>
         <div class="field" style="margin-top:8px;margin-bottom:0">
           <label>Recomendaciones / plan</label>
-          <textarea rows="3" class="no-print"
-            placeholder="Estudios complementarios, manejo, signos de alarma, traslado a ortopedia si aplica..."
-            oninput="App.setICEntrante('${ic.id}','recomendaciones',this.value)">${escapeHtml(ic.recomendaciones||'')}</textarea>
+          <div class="no-print">${dictArea({
+            id: 'ic-rec-'+ic.id, rows: 3,
+            placeholder: 'Estudios complementarios, manejo, signos de alarma, traslado a ortopedia si aplica...',
+            oninput: "App.setICEntrante('"+ic.id+"','recomendaciones',this.value)",
+            value: escapeHtml(ic.recomendaciones||'')
+          })}</div>
           <div class="print-only" style="white-space:pre-wrap">${escapeHtml(ic.recomendaciones||'—')}</div>
         </div>
         <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap" class="no-print">
@@ -4274,8 +4531,12 @@ service cloud.firestore {
 
       <div class="card">
         <h3>Resumen de evolución</h3>
-        <textarea rows="4" class="no-print" placeholder="Resumen de la hospitalización, complicaciones, manejo recibido…"
-          oninput="App.setEgreso('${eg.id}','resumenEvolucion',this.value)">${escapeHtml(eg.resumenEvolucion||'')}</textarea>
+        <div class="no-print">${dictArea({
+          id: 'eg-resev-'+eg.id, rows: 4,
+          placeholder: 'Resumen de la hospitalización, complicaciones, manejo recibido…',
+          oninput: "App.setEgreso('"+eg.id+"','resumenEvolucion',this.value)",
+          value: escapeHtml(eg.resumenEvolucion||'')
+        })}</div>
         <div class="print-only" style="white-space:pre-wrap">${escapeHtml(eg.resumenEvolucion||'—')}</div>
       </div>
 
@@ -4471,15 +4732,68 @@ service cloud.firestore {
           <h3 style="margin:0">Recomendaciones generales</h3>
           <button class="btn ghost small no-print" onclick="App.openEsquemaPicker('${eg.id}','recomendaciones')">+ Insertar esquema</button>
         </div>
-        <textarea rows="4" class="no-print" placeholder="Reposo, dieta, signos de alarma para regresar a urgencias, fisioterapia, restricciones de carga, etc."
-          oninput="App.setEgreso('${eg.id}','recomendaciones',this.value)">${escapeHtml(eg.recomendaciones||'')}</textarea>
+        <div class="no-print">${dictArea({
+          id: 'eg-rec-'+eg.id, rows: 4,
+          placeholder: 'Reposo, dieta, signos de alarma para regresar a urgencias, fisioterapia, restricciones de carga, etc.',
+          oninput: "App.setEgreso('"+eg.id+"','recomendaciones',this.value)",
+          value: escapeHtml(eg.recomendaciones||'')
+        })}</div>
         <div class="print-only" style="white-space:pre-wrap">${escapeHtml(eg.recomendaciones||'—')}</div>
+      </div>
+
+      <!-- Verificación con staff previo al egreso -->
+      <div class="card" style="border-left:4px solid ${eg.verificadoStaff && eg.verificadoStaff.confirmado ? '#059669':'#f59e0b'}">
+        <h3>Verificación con staff previo al egreso</h3>
+        <p class="muted no-print" style="font-size:.85rem">El egreso debe ser verificado por un médico de planta (staff) antes de imprimir y entregar al paciente.</p>
+        <div class="checkbox-row">
+          <input type="checkbox" id="vstaff-${eg.id}"
+            ${eg.verificadoStaff && eg.verificadoStaff.confirmado ? 'checked' : ''}
+            onchange="App.toggleVerificadoStaff('${eg.id}',this.checked)">
+          <label for="vstaff-${eg.id}"><strong>Verificado y aprobado por staff</strong></label>
+        </div>
+        ${eg.verificadoStaff && eg.verificadoStaff.confirmado ? `
+          <div class="alert-box green" style="margin-top:8px;font-size:.9rem">
+            ✓ Verificado por <strong>${escapeHtml(eg.verificadoStaff.staffNombre || '(sin nombre)')}</strong>
+            el ${eg.verificadoStaff.fecha ? new Date(eg.verificadoStaff.fecha).toLocaleString('es') : ''}
+          </div>
+          <div class="field-row no-print" style="margin-top:8px">
+            <div class="field" style="margin-bottom:0">
+              <label>Staff que verificó (editar si quieres cambiar)</label>
+              <input list="cirujanosList" value="${escapeHtml(eg.verificadoStaff.staffNombre||'')}"
+                onchange="App.setVerificadoStaff('${eg.id}','staffNombre',this.value)">
+            </div>
+            <div class="field" style="margin-bottom:0">
+              <label>Fecha y hora</label>
+              <input type="datetime-local" value="${escapeHtml((eg.verificadoStaff.fecha||'').slice(0,16))}"
+                onchange="App.setVerificadoStaff('${eg.id}','fecha',this.value ? this.value+':00.000Z':'')">
+            </div>
+          </div>
+          <div class="field no-print" style="margin-top:8px;margin-bottom:0">
+            <label>Notas del staff (opcional)</label>
+            <input value="${escapeHtml(eg.verificadoStaff.notas||'')}"
+              placeholder="Comentarios o ajustes finales"
+              oninput="App.setVerificadoStaff('${eg.id}','notas',this.value)">
+          </div>
+          ${eg.verificadoStaff.notas ? `<div class="print-only" style="margin-top:8px"><em>Notas del staff:</em> ${escapeHtml(eg.verificadoStaff.notas)}</div>` : ''}
+        ` : `
+          <div class="alert-box yellow no-print" style="margin-top:8px;font-size:.9rem">
+            ⚠ Pendiente de verificación por staff. El egreso no debe imprimirse ni entregarse al paciente hasta que un staff lo apruebe.
+          </div>
+        `}
       </div>
 
       <!-- Pie de impresión -->
       <div class="print-only" style="margin-top:24px;border-top:1px solid #ccc;padding-top:12px">
+        ${eg.verificadoStaff && eg.verificadoStaff.confirmado
+          ? `<div style="background:#ecfdf5;padding:8px;margin-bottom:10px;border-left:3px solid #059669">
+              <strong>✓ Verificado por staff:</strong> ${escapeHtml(eg.verificadoStaff.staffNombre || '_______________________')}
+              ${eg.verificadoStaff.fecha ? ' · ' + new Date(eg.verificadoStaff.fecha).toLocaleString('es') : ''}
+            </div>`
+          : `<div style="background:#fef3c7;padding:8px;margin-bottom:10px;border-left:3px solid #f59e0b">
+              <strong>⚠ Pendiente de verificación por staff</strong>
+            </div>`}
         <div style="display:flex;justify-content:space-between;font-size:.9em">
-          <div>Médico responsable: _______________________</div>
+          <div>Médico responsable: ${escapeHtml((eg.verificadoStaff && eg.verificadoStaff.staffNombre) || '_______________________')}</div>
           <div>Firma: _______________________</div>
         </div>
         <div style="margin-top:12px;font-size:.85em;color:#666">
@@ -4622,6 +4936,30 @@ service cloud.firestore {
     State.save();
   },
 
+  toggleVerificadoStaff(id, val) {
+    const eg = State.data.egresos.find(x => x.id === id);
+    if (!eg) return;
+    if (!eg.verificadoStaff) eg.verificadoStaff = { confirmado:false, staffNombre:'', fecha:'', notas:'' };
+    eg.verificadoStaff.confirmado = val;
+    if (val) {
+      if (!eg.verificadoStaff.staffNombre) eg.verificadoStaff.staffNombre = getCurrentUser() || '';
+      eg.verificadoStaff.fecha = new Date().toISOString();
+    }
+    eg.modificado = new Date().toISOString();
+    State.save();
+    const p = State.data.patients.find(x => x.id === eg.pacienteId);
+    if (p) logCambio(p, 'Egreso', val ? 'Verificado por staff: ' + eg.verificadoStaff.staffNombre : 'Verificación de staff retirada');
+    this.render();
+  },
+  setVerificadoStaff(id, campo, val) {
+    const eg = State.data.egresos.find(x => x.id === id);
+    if (!eg) return;
+    if (!eg.verificadoStaff) eg.verificadoStaff = { confirmado:false, staffNombre:'', fecha:'', notas:'' };
+    eg.verificadoStaff[campo] = val;
+    eg.modificado = new Date().toISOString();
+    State.save();
+  },
+
   setEgresoRayos(id, campo, val) {
     const eg = State.data.egresos.find(x => x.id === id);
     if (!eg) return;
@@ -4714,10 +5052,40 @@ service cloud.firestore {
       <div class="toolbar no-print">
         <h2 style="margin:0">Reportes</h2>
         <div style="flex:1"></div>
-        <button class="btn ghost small" onclick="App.exportarCSV('pacientes')">📊 CSV pacientes</button>
-        <button class="btn ghost small" onclick="App.exportarCSV('cirugias')">📊 CSV cirugías</button>
-        <button class="btn ghost small" onclick="App.exportarCSV('egresos')">📊 CSV egresos</button>
         <button class="btn ghost small" onclick="window.print()">🖨 Imprimir</button>
+      </div>
+
+      <div class="card no-print" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+        <div class="field" style="margin-bottom:0;flex:1;min-width:140px">
+          <label>Desde</label>
+          <input type="date" value="${escapeHtml(State.reporteDesde||'')}" onchange="App.setRangoReporte('desde',this.value)">
+        </div>
+        <div class="field" style="margin-bottom:0;flex:1;min-width:140px">
+          <label>Hasta</label>
+          <input type="date" value="${escapeHtml(State.reporteHasta||'')}" onchange="App.setRangoReporte('hasta',this.value)">
+        </div>
+        <div class="row-gap">
+          <button class="btn ghost small" onclick="App.setRangoRapido('mes')">Este mes</button>
+          <button class="btn ghost small" onclick="App.setRangoRapido('trim')">Trimestre</button>
+          <button class="btn ghost small" onclick="App.setRangoRapido('año')">Año</button>
+          <button class="btn ghost small" onclick="App.setRangoRapido('todo')">Todo</button>
+        </div>
+        <div class="row-gap">
+          <button class="btn small" onclick="App.exportarExcel('pacientes')">📗 Excel pacientes</button>
+          <button class="btn small" onclick="App.exportarExcel('cirugias')">📗 Excel cirugías</button>
+          <button class="btn small" onclick="App.exportarExcel('egresos')">📗 Excel egresos</button>
+        </div>
+        <div class="row-gap">
+          <button class="btn ghost small" onclick="App.exportarCSV('pacientes')">CSV pacientes</button>
+          <button class="btn ghost small" onclick="App.exportarCSV('cirugias')">CSV cirugías</button>
+          <button class="btn ghost small" onclick="App.exportarCSV('egresos')">CSV egresos</button>
+        </div>
+      </div>
+
+      <div class="alert-box blue no-print" style="font-size:.85rem">
+        ${(State.reporteDesde || State.reporteHasta)
+          ? 'Filtrando por rango: ' + (State.reporteDesde||'inicio') + ' → ' + (State.reporteHasta||'hoy')
+          : 'Sin filtro de fecha (mostrando datos históricos completos)'}
       </div>
 
       <!-- KPIs principales -->
@@ -4807,6 +5175,55 @@ service cloud.firestore {
         ${this._renderHBarChart(this._topProcedimientos(15))}
       </div>
 
+      <!-- Métricas de calidad clínica -->
+      <div class="card">
+        <h3>Métricas de calidad clínica</h3>
+        <p class="muted" style="font-size:.85rem">
+          ${(State.reporteDesde || State.reporteHasta) ? 'En el rango seleccionado' : 'Histórico completo'}
+        </p>
+        ${(() => {
+          const q = this._metricasCalidad();
+          return `
+            <div class="kpi-grid">
+              <div class="kpi yellow">
+                <div class="kpi-label">Tasa infección postop</div>
+                <div class="kpi-value">${q.tasaInfeccion.toFixed(1)}%</div>
+                <div class="kpi-sub">${q.conInfeccionPostop} de ${q.totalOperados} operados</div>
+              </div>
+              <div class="kpi">
+                <div class="kpi-label">Estancia preop promedio</div>
+                <div class="kpi-value">${q.estanciaPreopProm.toFixed(1)}</div>
+                <div class="kpi-sub">días desde ingreso a 1ª cirugía</div>
+              </div>
+              <div class="kpi">
+                <div class="kpi-label">Estancia postop promedio</div>
+                <div class="kpi-value">${q.estanciaPostopProm.toFixed(1)}</div>
+                <div class="kpi-sub">días desde cirugía hasta egreso</div>
+              </div>
+              <div class="kpi red">
+                <div class="kpi-label">Cirugías suspendidas</div>
+                <div class="kpi-value">${q.suspendidas}</div>
+                <div class="kpi-sub">de ${q.programadasTotal} programadas (${q.tasaSuspension.toFixed(1)}%)</div>
+              </div>
+              <div class="kpi">
+                <div class="kpi-label">Promedio cirugías/paciente</div>
+                <div class="kpi-value">${q.cirugiasPorPaciente.toFixed(2)}</div>
+                <div class="kpi-sub">re-intervenciones consideradas</div>
+              </div>
+              <div class="kpi green">
+                <div class="kpi-label">Egresos verificados por staff</div>
+                <div class="kpi-value">${q.egresosVerificados}/${q.egresosTotal}</div>
+                <div class="kpi-sub">${q.tasaVerificacion.toFixed(0)}% con visto bueno</div>
+              </div>
+            </div>
+            ${q.motivosSuspension.length > 0 ? `
+              <h4 style="margin-top:14px">Motivos de cirugías suspendidas</h4>
+              ${this._renderHBarChart(q.motivosSuspension)}
+            ` : ''}
+          `;
+        })()}
+      </div>
+
       <!-- Pie de impresión -->
       <div class="print-only" style="margin-top:24px;font-size:.8em;color:#666;border-top:1px solid #ccc;padding-top:8px">
         Total de pacientes registrados: ${State.data.patients.length}
@@ -4814,6 +5231,39 @@ service cloud.firestore {
         · Egresos: ${(State.data.egresos||[]).length}
       </div>
     `;
+  },
+
+  /* ---------- Filtros de fecha en reportes ---------- */
+  setRangoReporte(campo, valor) {
+    if (campo === 'desde') State.reporteDesde = valor;
+    else if (campo === 'hasta') State.reporteHasta = valor;
+    this.render();
+  },
+  setRangoRapido(tipo) {
+    const hoy = new Date();
+    if (tipo === 'mes') {
+      State.reporteDesde = hoy.getFullYear() + '-' + String(hoy.getMonth()+1).padStart(2,'0') + '-01';
+      State.reporteHasta = todayISO();
+    } else if (tipo === 'trim') {
+      const q = Math.floor(hoy.getMonth()/3);
+      State.reporteDesde = hoy.getFullYear() + '-' + String(q*3+1).padStart(2,'0') + '-01';
+      State.reporteHasta = todayISO();
+    } else if (tipo === 'año') {
+      State.reporteDesde = hoy.getFullYear() + '-01-01';
+      State.reporteHasta = todayISO();
+    } else {
+      State.reporteDesde = '';
+      State.reporteHasta = '';
+    }
+    this.render();
+  },
+  // Verifica si una fecha ISO (YYYY-MM-DD o ISO datetime) está dentro del rango configurado
+  _enRango(fechaISO) {
+    if (!fechaISO) return false;
+    const f = fechaISO.slice(0,10);
+    if (State.reporteDesde && f < State.reporteDesde) return false;
+    if (State.reporteHasta && f > State.reporteHasta) return false;
+    return true;
   },
 
   /* ---------- Cálculos de métricas ---------- */
@@ -4942,6 +5392,88 @@ service cloud.firestore {
       .slice(0, n);
   },
 
+  // Métricas de calidad clínica (respeta el filtro de fechas si está activo)
+  _metricasCalidad() {
+    const enRango = (f) => !f ? false : (
+      (!State.reporteDesde && !State.reporteHasta) ? true : this._enRango(f)
+    );
+    const pacientesEnRango = State.data.patients.filter(p => {
+      if (!State.reporteDesde && !State.reporteHasta) return true;
+      return this._enRango(p.fechaIngreso) || this._enRango(p.fechaEgreso) ||
+        (p.cirugiasRealizadas||[]).some(c => this._enRango(c.fecha));
+    });
+    // Operados en rango
+    let totalOperados = 0;
+    let conInfeccionPostop = 0;
+    let sumPreop = 0, countPreop = 0;
+    let sumPostop = 0, countPostop = 0;
+    let sumCirugias = 0;
+    pacientesEnRango.forEach(p => {
+      const cirugias = (p.cirugiasRealizadas||[])
+        .filter(c => !State.reporteDesde && !State.reporteHasta ? true : this._enRango(c.fecha))
+        .slice().sort((a,b) => (a.fecha||'').localeCompare(b.fecha||''));
+      if (cirugias.length === 0) return;
+      totalOperados++;
+      sumCirugias += cirugias.length;
+      // Infección postop: si tiene infección en dx y la primera cirugía fue antes
+      if (tieneInfeccion(p)) {
+        conInfeccionPostop++;
+      }
+      // Estancia preop: días desde ingreso hasta 1ª cirugía
+      if (p.fechaIngreso && cirugias[0].fecha) {
+        const d = daysBetween(p.fechaIngreso, cirugias[0].fecha);
+        if (d >= 0) { sumPreop += d; countPreop++; }
+      }
+      // Estancia postop: días desde 1ª cirugía hasta egreso (si existe)
+      if (cirugias[0].fecha && p.fechaEgreso && p.fechaEgreso >= cirugias[0].fecha) {
+        const d = daysBetween(cirugias[0].fecha, p.fechaEgreso);
+        if (d >= 0) { sumPostop += d; countPostop++; }
+      }
+    });
+
+    // Suspendidas: entradas en programa con operado=false
+    let suspendidas = 0, programadasTotal = 0;
+    const motivosCount = {};
+    (State.data.programas||[]).forEach(prg => {
+      if ((State.reporteDesde || State.reporteHasta) && !this._enRango(prg.fecha)) return;
+      (prg.pacientes||[]).forEach(e => {
+        programadasTotal++;
+        if (e.operado === false) {
+          suspendidas++;
+          const m = (e.motivoNoOperado||'(sin motivo)').trim() || '(sin motivo)';
+          motivosCount[m] = (motivosCount[m]||0) + 1;
+        }
+      });
+    });
+
+    // Egresos verificados por staff (en rango)
+    const egresosRange = (State.data.egresos||[]).filter(eg =>
+      (!State.reporteDesde && !State.reporteHasta) ? true : this._enRango(eg.fechaEgreso));
+    const egresosTotal = egresosRange.length;
+    const egresosVerificados = egresosRange.filter(eg => eg.verificadoStaff && eg.verificadoStaff.confirmado).length;
+
+    const motivosSuspension = Object.entries(motivosCount)
+      .map(([label, value]) => ({ label, value, color: '#dc2626' }))
+      .sort((a,b) => b.value - a.value)
+      .slice(0, 8);
+
+    return {
+      totalOperados,
+      conInfeccionPostop,
+      tasaInfeccion: totalOperados > 0 ? (conInfeccionPostop / totalOperados) * 100 : 0,
+      estanciaPreopProm: countPreop > 0 ? sumPreop / countPreop : 0,
+      estanciaPostopProm: countPostop > 0 ? sumPostop / countPostop : 0,
+      suspendidas,
+      programadasTotal,
+      tasaSuspension: programadasTotal > 0 ? (suspendidas / programadasTotal) * 100 : 0,
+      cirugiasPorPaciente: totalOperados > 0 ? sumCirugias / totalOperados : 0,
+      egresosTotal,
+      egresosVerificados,
+      tasaVerificacion: egresosTotal > 0 ? (egresosVerificados / egresosTotal) * 100 : 0,
+      motivosSuspension
+    };
+  },
+
   _topProcedimientos(n) {
     const counts = {};
     State.data.patients.forEach(p => {
@@ -5055,6 +5587,108 @@ service cloud.firestore {
     a.download = `ortopedia_${tipo}_${todayISO()}.csv`;
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
+  },
+
+  // Exportar a Excel (archivo .xls que Excel/Numbers/Sheets abren nativamente)
+  // Usa formato de tabla HTML con MIME application/vnd.ms-excel
+  exportarExcel(tipo) {
+    const datos = this._datosParaExport(tipo);
+    if (!datos) return;
+    const cfg = getConfig();
+    const tituloMap = { pacientes:'Pacientes', cirugias:'Cirugías', egresos:'Egresos' };
+    const rango = (State.reporteDesde || State.reporteHasta)
+      ? ' · Rango: ' + (State.reporteDesde||'inicio') + ' a ' + (State.reporteHasta||'hoy')
+      : '';
+    const escapeXLS = (s) => String(s == null ? '' : s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+    const html = `<html xmlns:x="urn:schemas-microsoft-com:office:excel">
+<head>
+<meta charset="UTF-8">
+<style>
+  table { border-collapse: collapse; }
+  th { background: #0f4c75; color: white; padding: 8px; border: 1px solid #888; text-align: left; }
+  td { padding: 6px 8px; border: 1px solid #ccc; }
+  tr:nth-child(even) td { background: #f5f7fa; }
+</style>
+</head>
+<body>
+<h2>${escapeXLS(cfg.hospitalNombre || '')} — ${escapeXLS(tituloMap[tipo]||tipo)}</h2>
+<p>Generado el ${new Date().toLocaleString('es')}${escapeXLS(rango)}</p>
+<table>
+  <thead><tr>${datos.header.map(h => `<th>${escapeXLS(h)}</th>`).join('')}</tr></thead>
+  <tbody>
+    ${datos.rows.map(r => `<tr>${r.map(c => `<td>${escapeXLS(c)}</td>`).join('')}</tr>`).join('')}
+  </tbody>
+</table>
+</body>
+</html>`;
+    const blob = new Blob(['﻿' + html], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ortopedia_${tipo}_${todayISO()}.xls`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  },
+
+  // Datos para CSV/Excel (filtra por rango si está configurado)
+  _datosParaExport(tipo) {
+    let header = [], rows = [];
+    if (tipo === 'pacientes') {
+      header = ['ID','Nombre','Cédula','Edad','Sexo','Ubicación','Cama','Cirujano','Fecha ingreso','Fecha egreso','Días hospitalización','Diagnósticos','Alergias','Antecedentes','# Cirugías','Cirugías','Estado'];
+      rows = State.data.patients
+        .filter(p => {
+          // Si hay filtro de fecha, incluir si tiene actividad en el rango (ingreso o egreso)
+          if (!State.reporteDesde && !State.reporteHasta) return true;
+          return this._enRango(p.fechaIngreso) || this._enRango(p.fechaEgreso) ||
+            (p.cirugiasRealizadas||[]).some(c => this._enRango(c.fecha));
+        })
+        .map(p => {
+          const dias = p.fechaIngreso ? daysBetween(p.fechaIngreso, p.fechaEgreso) : '';
+          const apto = evaluarAptoCirugia(p);
+          const estado = p.fechaEgreso ? 'Egresado'
+            : apto.listo ? 'Listo cirugía'
+            : apto.operado ? 'Operado' + (p.requiereOtraCirugia ? ' (req otra)' : '')
+            : tieneContraindicacion(p) ? 'No apto' : 'Pendiente preop';
+          const cirugias = (p.cirugiasRealizadas||[]).map(c => `${c.fecha} ${c.procedimiento||''}`).join(' | ');
+          return [
+            p.id, p.nombre||'', p.cedula||'', p.edad||'', p.sexo||'', p.ubicacion||'', p.cama||'', p.cirujano||'',
+            p.fechaIngreso||'', p.fechaEgreso||'', dias,
+            (p.diagnosticos||[]).join(' | '), p.alergias||'', p.antecedentesPatologicos||'',
+            (p.cirugiasRealizadas||[]).length, cirugias, estado
+          ];
+        });
+    } else if (tipo === 'cirugias') {
+      header = ['Fecha','Paciente','Cédula','Edad','Procedimiento','Lateralidad','Cirujano','Quirófano','Diagnóstico','Notas'];
+      State.data.patients.forEach(p => {
+        (p.cirugiasRealizadas||[]).forEach(c => {
+          if ((State.reporteDesde || State.reporteHasta) && !this._enRango(c.fecha)) return;
+          rows.push([
+            c.fecha||'', p.nombre||'', p.cedula||'', p.edad||'',
+            c.procedimiento||'', c.lateralidad||'', c.cirujano||'', c.quirofano||'',
+            (p.diagnosticos||[]).join(' | '), c.notas||''
+          ]);
+        });
+      });
+      rows.sort((a,b) => (b[0]||'').localeCompare(a[0]||''));
+    } else if (tipo === 'egresos') {
+      header = ['Fecha egreso','Paciente','Cédula','Edad','Cama','Días hospitalización','Cirujano','Dx final','# Cirugías','Cita control','Lugar cita','Rx control'];
+      (State.data.egresos||[]).forEach(eg => {
+        if ((State.reporteDesde || State.reporteHasta) && !this._enRango(eg.fechaEgreso)) return;
+        const p = State.data.patients.find(x => x.id === eg.pacienteId) || {};
+        const dias = p.fechaIngreso ? daysBetween(p.fechaIngreso, eg.fechaEgreso) : '';
+        rows.push([
+          eg.fechaEgreso||'', p.nombre||'', p.cedula||'', p.edad||'', p.cama||'',
+          dias, p.cirujano||'',
+          eg.diagnosticoFinal || (p.diagnosticos||[]).join(' | '),
+          (eg.cirugiasResumen||[]).length,
+          (eg.citaControl||{}).fecha || '',
+          (eg.citaControl||{}).lugar || '',
+          (eg.rayosXControl||{}).requiere ? (eg.rayosXControl.descripcion || 'sí') : 'no'
+        ]);
+      });
+      rows.sort((a,b) => (b[0]||'').localeCompare(a[0]||''));
+    }
+    return { header, rows };
   },
 
   /* ---------- Alertas globales ---------- */
@@ -5834,21 +6468,33 @@ service cloud.firestore {
         </p>
         ${evs.length === 0 ? `
           <div class="empty" style="padding:20px"><div class="ico">📝</div><div>Sin evoluciones registradas.</div></div>
-        ` : evs.map(ev => `
+        ` : evs.map((ev, idx) => {
+          return `
           <div class="card compact" style="margin-top:10px">
             <div class="row-between">
               <strong>${ev.fecha ? new Date(ev.fecha).toLocaleString('es', {weekday:'long',day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—'}</strong>
               <span class="muted" style="font-size:.8rem">${escapeHtml(ev.autor || '(sin autor)')}</span>
             </div>
+            <div class="row-gap" style="margin-top:6px">
+              <button class="btn ghost small" onclick="App.openPlantillaEvolucion('${p.id}','${ev.id}')">📋 Plantilla</button>
+              ${idx < evs.length - 1
+                ? `<button class="btn ghost small" onclick="App.copiarEvolucionAnterior('${p.id}','${ev.id}')">↻ Copiar de la anterior</button>`
+                : ''}
+            </div>
             <div class="field" style="margin-top:8px;margin-bottom:0">
-              <textarea rows="6" placeholder="Subjetivo, hallazgos al examen físico, evolución, plan..."
-                oninput="App.setEvolucion('${p.id}','${ev.id}','texto',this.value)">${escapeHtml(ev.texto||'')}</textarea>
+              ${dictArea({
+                id: 'ev-ta-'+ev.id,
+                rows: 6,
+                placeholder: 'Subjetivo, hallazgos al examen físico, evolución, plan...',
+                oninput: "App.setEvolucion('"+p.id+"','"+ev.id+"','texto',this.value)",
+                value: escapeHtml(ev.texto||'')
+              })}
             </div>
             <div style="text-align:right;margin-top:6px">
               <button class="btn ghost small" onclick="App.eliminarEvolucion('${p.id}','${ev.id}')">Eliminar</button>
             </div>
           </div>
-        `).join('')}
+        `;}).join('')}
       </div>
     `;
   },
@@ -5882,6 +6528,60 @@ service cloud.firestore {
     logCambio(p, 'Evolución', 'Entrada eliminada');
     State.save();
     this.renderModal(id);
+  },
+  copiarEvolucionAnterior(id, evId) {
+    const p = this._findP(id); if (!p) return;
+    const evs = (p.evoluciones||[]).slice().sort((a,b) => (b.fecha||'').localeCompare(a.fecha||''));
+    const idx = evs.findIndex(x => x.id === evId);
+    if (idx < 0 || idx >= evs.length - 1) { alert('No hay evolución anterior.'); return; }
+    const ev = evs[idx];
+    const anterior = evs[idx + 1];
+    if (ev.texto && !confirm('Esto reemplazará el texto actual con el de la evolución anterior. ¿Continuar?')) return;
+    ev.texto = anterior.texto || '';
+    ev.modificado = new Date().toISOString();
+    logCambio(p, 'Evolución', 'Copiada de la entrada anterior');
+    State.save();
+    this.renderModal(id);
+  },
+  openPlantillaEvolucion(pacienteId, evId) {
+    const plantillas = getCatalogo('plantillasEvolucion');
+    const html = `
+      <div class="modal-backdrop" onclick="if(event.target===this) App._closeSecondary()">
+        <div class="modal" style="max-width:700px">
+          <div class="modal-head">
+            <div>
+              <div style="font-weight:600">Insertar plantilla de evolución</div>
+              <div style="font-size:.8rem;opacity:.9">Click sobre la plantilla para insertarla. Después puedes editar lo específico.</div>
+            </div>
+            <button class="close-x" onclick="App._closeSecondary()">✕</button>
+          </div>
+          <div class="modal-body">
+            ${plantillas.length === 0 ? '<div class="empty">No hay plantillas en el catálogo.</div>'
+              : plantillas.map((t, i) => `
+                <div class="card compact" style="margin-bottom:8px;cursor:pointer"
+                  onclick="App._aplicarPlantillaEvolucion('${pacienteId}','${evId}',${i})">
+                  ${escapeHtml(t)}
+                </div>
+              `).join('')}
+          </div>
+          <div class="modal-foot">
+            <button class="btn ghost" onclick="App._closeSecondary()">Cerrar</button>
+          </div>
+        </div>
+      </div>
+    `;
+    this._renderSecondary(html);
+  },
+  _aplicarPlantillaEvolucion(pacienteId, evId, idxPlantilla) {
+    const p = this._findP(pacienteId); if (!p) return;
+    const ev = (p.evoluciones||[]).find(x => x.id === evId);
+    if (!ev) return;
+    const plantilla = getCatalogo('plantillasEvolucion')[idxPlantilla];
+    if (!plantilla) return;
+    ev.texto = (ev.texto ? ev.texto + '\n\n' : '') + plantilla;
+    ev.modificado = new Date().toISOString();
+    State.save();
+    this._closeSecondary();
   },
 
   /* -------- Medicamentos -------- */
