@@ -639,7 +639,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.19-unificar-ambulatorios-2026-05-10';
+const APP_VERSION = 'v3.20-evaluacion-preop-tipificada-2026-05-10';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -662,6 +662,36 @@ const SPECIALIDADES_PREOP = [
   'Medicina Interna', 'Medicina Familiar', 'Geriatría',
   'Cardiología', 'Neumología', 'Endocrinología',
   'Nefrología', 'Hematología', 'Otra'
+];
+/* Estados posibles de la evaluación preoperatoria */
+const PREOP_ESTADOS = [
+  { v:'pendiente',         label:'Pendiente (no solicitada)',                cls:'red'    },
+  { v:'solicitada',        label:'Solicitada (esperando respuesta)',          cls:'yellow' },
+  { v:'apto',              label:'Apto sin condiciones',                      cls:'green'  },
+  { v:'apto_condicional',  label:'Apto con condiciones (pendientes a cumplir)', cls:'yellow' },
+  { v:'no_apto_temporal',  label:'No apto temporalmente (requiere optimización)', cls:'red' },
+  { v:'no_apto',           label:'No apto (contraindicación)',                 cls:'red'    }
+];
+/* Plantillas frecuentes de pendientes derivados de la evaluación preop */
+const PLANTILLAS_PENDIENTES_PREOP = [
+  'Repetir creatinina',
+  'INR <1.5',
+  'TA <140/90 sostenida',
+  'Glucemia <180 mg/dL',
+  'HbA1c <8%',
+  'Suspender ASA 7 días antes',
+  'Suspender clopidogrel 7 días antes',
+  'Suspender enoxaparina 24 h antes',
+  'Suspender warfarina y puente con heparina',
+  'Hb >10 g/dL',
+  'Plaquetas >100 000',
+  'Reservar 2 unidades de GR',
+  'Eco cardiograma',
+  'Espirometría',
+  'Control de FC <100',
+  'SatO2 >92% al aire ambiente',
+  'Repetir EKG',
+  'Reevaluar en 48–72 h'
 ];
 /* ---------- Catálogos sembrados (sólo se usan al primer inicio o si vacíos) ---------- */
 const SEED_DIAGNOSTICOS = [
@@ -908,7 +938,15 @@ function nuevoPaciente() {
       tiemposCoagulacion: { realizado:false, fecha:'', resultado:'' },
       quimicaSanguinea: { realizado:false, fecha:'', resultado:'' },
       ekg: { realizado:false, fecha:'', resultado:'' },
-      evaluacionPreop: { realizado:false, fecha:'', especialidad:'', resultado:'' }
+      evaluacionPreop: {
+        realizado:false,
+        fecha:'',                 // fecha de respuesta
+        fechaSolicitud:'',        // fecha en que se solicitó la evaluación
+        especialidad:'',
+        resultado:'',             // conclusión / recomendaciones (texto libre)
+        estado:'pendiente',       // pendiente | solicitada | apto | apto_condicional | no_apto_temporal | no_apto
+        pendientes:[]             // [{id, texto, cumplido, fechaCreacion, fechaCumplido}]
+      }
     },
     medicamentos: [],   // {id,nombre,dosis,via,frecuencia,inicio,fin,activo,nota}
     laboratorios: [],   // {id, fecha, valores:{Hb,Hct,Leu,Plt,Cr,BUN,Glu,Na,K,Ca,PCR,VES,...}, nota}
@@ -1742,6 +1780,17 @@ const State = {
       }
       if (p.requiereOtraCirugia === undefined) p.requiereOtraCirugia = false;
 
+      // Migración v3.20: evaluación preop tipificada
+      if (p.estudios && p.estudios.evaluacionPreop) {
+        const ep = p.estudios.evaluacionPreop;
+        if (ep.estado === undefined) {
+          // Mapear modelo viejo: realizado=true → apto sin condiciones, false → pendiente
+          ep.estado = ep.realizado ? 'apto' : 'pendiente';
+        }
+        if (!Array.isArray(ep.pendientes)) ep.pendientes = [];
+        if (ep.fechaSolicitud === undefined) ep.fechaSolicitud = '';
+      }
+
       if (p.programaQx && p.programaQx.programado && !p._migratedToPrograma) {
         const fecha = p.programaQx.fechaProgramada || todayISO();
         let prog = data.programas.find(pg => pg.fecha === fecha);
@@ -1793,12 +1842,48 @@ function estudiosBasicos(p) {
 function estudiosCompletos(p) {
   return estudiosBasicos(p)
     && p.estudios.ekg.realizado
-    && p.estudios.evaluacionPreop.realizado;
+    && preopHabilitaCirugia(getEvalPreop(p));
 }
 
 function tieneContraindicacion(p) {
   const c = p.contraindicaciones || {};
   return c.malEstadoGeneral || c.malEstadoTejidos || (c.otra && c.otra.trim().length > 0);
+}
+
+/**
+ * Helpers de evaluación preoperatoria (v3.20)
+ */
+function getEvalPreop(p) {
+  if (!p.estudios) return null;
+  const ep = p.estudios.evaluacionPreop;
+  if (!ep) return null;
+  if (!ep.estado) ep.estado = ep.realizado ? 'apto' : 'pendiente';
+  if (!Array.isArray(ep.pendientes)) ep.pendientes = [];
+  return ep;
+}
+function preopPendientesFaltan(ep) {
+  if (!ep || !Array.isArray(ep.pendientes)) return 0;
+  return ep.pendientes.filter(x => !x.cumplido).length;
+}
+function preopEstadoLabel(estado) {
+  const def = PREOP_ESTADOS.find(e => e.v === estado);
+  return def ? def.label : estado;
+}
+function preopEstadoCls(estado) {
+  const def = PREOP_ESTADOS.find(e => e.v === estado);
+  return def ? def.cls : 'gray';
+}
+/**
+ * ¿La evaluación preop es válida para considerar al paciente apto?
+ * - 'apto'             → siempre sí
+ * - 'apto_condicional' → sólo si todos los pendientes están cumplidos
+ * - resto              → no
+ */
+function preopHabilitaCirugia(ep) {
+  if (!ep) return false;
+  if (ep.estado === 'apto') return true;
+  if (ep.estado === 'apto_condicional') return preopPendientesFaltan(ep) === 0;
+  return false;
 }
 
 /**
@@ -1839,13 +1924,40 @@ function evaluarAptoCirugia(p) {
   if (!p.estudios.quimicaSanguinea.realizado) faltantes.push('Química sanguínea');
   if (requiereCompletos) {
     if (!p.estudios.ekg.realizado) faltantes.push('EKG');
-    if (!p.estudios.evaluacionPreop.realizado) faltantes.push('Eval. preop. M.I./M.F./Geriatría');
   }
 
-  if (faltantes.length === 0) {
-    return { listo:true, motivo: requiereCompletos ? 'Preop completo' : 'Estudios básicos completos', faltantes:[] };
+  // Evaluación preoperatoria tipificada (v3.20)
+  const ep = getEvalPreop(p);
+  let preopBloquea = null;
+  if (requiereCompletos) {
+    if (!ep || ep.estado === 'pendiente') {
+      faltantes.push('Solicitar eval. preop. M.I./M.F./Geriatría');
+    } else if (ep.estado === 'solicitada') {
+      faltantes.push('Esperando respuesta de eval. preop.');
+    } else if (ep.estado === 'apto_condicional') {
+      const faltan = preopPendientesFaltan(ep);
+      if (faltan > 0) {
+        faltantes.push(`Eval. preop apta con ${faltan} pendiente(s) por cumplir`);
+      }
+    } else if (ep.estado === 'no_apto_temporal') {
+      preopBloquea = 'No apto temporalmente por evaluación preoperatoria';
+    } else if (ep.estado === 'no_apto') {
+      preopBloquea = 'No apto por evaluación preoperatoria';
+    }
   }
-  return { listo:false, motivo:'Faltan estudios', faltantes };
+
+  if (preopBloquea) {
+    return { listo:false, motivo: preopBloquea, faltantes, preopEstado: ep ? ep.estado : 'pendiente' };
+  }
+  if (faltantes.length === 0) {
+    return {
+      listo:true,
+      motivo: requiereCompletos ? 'Preop completo' : 'Estudios básicos completos',
+      faltantes:[],
+      preopEstado: ep ? ep.estado : 'pendiente'
+    };
+  }
+  return { listo:false, motivo:'Faltan estudios', faltantes, preopEstado: ep ? ep.estado : 'pendiente' };
 }
 
 /**
@@ -1888,6 +2000,35 @@ function calcularAlertasPaciente(p) {
       }
     }
   });
+
+  // 2b. Evaluación preoperatoria solicitada hace >3 días sin respuesta
+  const ep = getEvalPreop(p);
+  if (ep && ep.estado === 'solicitada' && ep.fechaSolicitud) {
+    const d = daysBetween(ep.fechaSolicitud);
+    if (d >= 3) {
+      alertas.push({
+        tipo:'yellow',
+        texto:`Evaluación preoperatoria${ep.especialidad?' a '+ep.especialidad:''} solicitada hace ${d} día(s) sin respuesta.`
+      });
+    }
+  }
+
+  // 2c. Apto con condiciones: pendientes derivados sin cumplir
+  if (ep && ep.estado === 'apto_condicional') {
+    const faltan = preopPendientesFaltan(ep);
+    if (faltan > 0) {
+      alertas.push({
+        tipo:'yellow',
+        texto:`Apto con condiciones: ${faltan} pendiente(s) por cumplir antes de cirugía.`
+      });
+    }
+  }
+  if (ep && (ep.estado === 'no_apto_temporal' || ep.estado === 'no_apto')) {
+    alertas.push({
+      tipo:'red',
+      texto:`Evaluación preoperatoria: ${preopEstadoLabel(ep.estado)}.`
+    });
+  }
 
   // 3. Listo para cirugía
   const apto = evaluarAptoCirugia(p);
@@ -3134,7 +3275,22 @@ service cloud.firestore {
     } else if (apto.listo) {
       estadoTag = '<span class="tag green">Listo cirugía</span>';
     } else {
-      estadoTag = '<span class="tag red">Pendiente</span>';
+      // Estado más específico según evaluación preop
+      const ep = getEvalPreop(p);
+      const epEstado = ep ? ep.estado : 'pendiente';
+      const faltanPP = preopPendientesFaltan(ep);
+      if (epEstado === 'apto_condicional' && faltanPP > 0) {
+        estadoTag = `<span class="tag yellow">Apto con ${faltanPP} pendiente(s)</span>`;
+      } else if (epEstado === 'no_apto') {
+        estadoTag = '<span class="tag red">No apto (preop)</span>';
+      } else if (epEstado === 'no_apto_temporal') {
+        estadoTag = '<span class="tag red">No apto temporal</span>';
+      } else if (epEstado === 'solicitada') {
+        const dSol = ep && ep.fechaSolicitud ? daysBetween(ep.fechaSolicitud) : 0;
+        estadoTag = `<span class="tag yellow">Eval. solicitada${dSol>=3?' · '+dSol+'d':''}</span>`;
+      } else {
+        estadoTag = '<span class="tag red">Pendiente preop</span>';
+      }
     }
     const tagsHtml = [
       p.enListaEspera ? '<span class="tag blue">🚶 Ambulatorio</span>' : '',
@@ -3283,11 +3439,28 @@ service cloud.firestore {
       if (progPend) cls += ' ready';
       else if (apto.listo) cls += ' ready';
       if (p.prioridadListaEspera === 'alta' && !apto.listo && !progPend) cls += ' alert';
-      const estadoTag = progPend
-        ? `<span class="tag blue">📅 Programado · ${fmtDate(progPend.programa.fecha)}${progPend.entrada.quirofano?' · Q'+escapeHtml(progPend.entrada.quirofano):''}</span>`
-        : (apto.listo
-            ? '<span class="tag green">✓ Listo cirugía</span>'
-            : '<span class="tag red">Pendiente preop</span>');
+      let estadoTag;
+      if (progPend) {
+        estadoTag = `<span class="tag blue">📅 Programado · ${fmtDate(progPend.programa.fecha)}${progPend.entrada.quirofano?' · Q'+escapeHtml(progPend.entrada.quirofano):''}</span>`;
+      } else if (apto.listo) {
+        estadoTag = '<span class="tag green">✓ Listo cirugía</span>';
+      } else {
+        const ep = getEvalPreop(p);
+        const epEstado = ep ? ep.estado : 'pendiente';
+        const faltanPP = preopPendientesFaltan(ep);
+        if (epEstado === 'apto_condicional' && faltanPP > 0) {
+          estadoTag = `<span class="tag yellow">Apto con ${faltanPP} pendiente(s)</span>`;
+        } else if (epEstado === 'no_apto') {
+          estadoTag = '<span class="tag red">No apto (preop)</span>';
+        } else if (epEstado === 'no_apto_temporal') {
+          estadoTag = '<span class="tag red">No apto temporal</span>';
+        } else if (epEstado === 'solicitada') {
+          const dSol = ep && ep.fechaSolicitud ? daysBetween(ep.fechaSolicitud) : 0;
+          estadoTag = `<span class="tag yellow">Eval. solicitada${dSol>=3?' · '+dSol+'d':''}</span>`;
+        } else {
+          estadoTag = '<span class="tag red">Pendiente preop</span>';
+        }
+      }
       return `
         <div class="${cls}" onclick="App.openPaciente('${p.id}')" style="margin-bottom:10px">
           <div class="pc-row">
@@ -6512,9 +6685,13 @@ service cloud.firestore {
       `;
     } else if (tieneContraindicacion(p)) {
       aptoBox = `<div class="alert-box red"><strong>✗ No apto.</strong> ${escapeHtml(apto.motivo)}</div>`;
+    } else if (apto.preopEstado === 'no_apto') {
+      aptoBox = `<div class="alert-box red"><strong>✗ No apto por evaluación preoperatoria.</strong> ${escapeHtml(apto.motivo)}</div>`;
+    } else if (apto.preopEstado === 'no_apto_temporal') {
+      aptoBox = `<div class="alert-box red"><strong>✗ No apto temporalmente.</strong> Requiere optimización antes de proceder a cirugía. ${escapeHtml(apto.motivo)}</div>`;
     } else {
       aptoBox = apto.faltantes && apto.faltantes.length > 0
-        ? `<div class="alert-box yellow"><strong>Faltan estudios:</strong> ${apto.faltantes.map(escapeHtml).join(', ')}</div>`
+        ? `<div class="alert-box yellow"><strong>Faltan estudios o pasos:</strong> ${apto.faltantes.map(escapeHtml).join(', ')}</div>`
         : `<div class="alert-box yellow"><strong>Pendiente:</strong> ${escapeHtml(apto.motivo||'revisar preoperatorio')}</div>`;
     }
 
@@ -6552,35 +6729,96 @@ service cloud.firestore {
       `;
     };
 
-    const evalPre = p.estudios.evaluacionPreop;
+    const evalPre = getEvalPreop(p);
+    const epEstado = evalPre.estado || 'pendiente';
+    const epCls = preopEstadoCls(epEstado);
+    const epLabel = preopEstadoLabel(epEstado);
+    const tieneFechaSol = !!evalPre.fechaSolicitud;
+    const diasSolicitud = tieneFechaSol ? daysBetween(evalPre.fechaSolicitud) : 0;
+    const muestraSolicitud = ['solicitada','apto','apto_condicional','no_apto_temporal','no_apto'].includes(epEstado);
+    const muestraResultado = ['apto','apto_condicional','no_apto_temporal','no_apto'].includes(epEstado);
+    const muestraPendientes = ['apto_condicional','no_apto_temporal'].includes(epEstado);
+    const totalPend = (evalPre.pendientes||[]).length;
+    const faltanPend = preopPendientesFaltan(evalPre);
+    const cumplPend = totalPend - faltanPend;
+
+    const opcionesEstado = PREOP_ESTADOS.map(e =>
+      `<option value="${e.v}" ${epEstado===e.v?'selected':''}>${escapeHtml(e.label)}</option>`
+    ).join('');
+
+    const avisoDemora = (epEstado==='solicitada' && tieneFechaSol && diasSolicitud >= 3)
+      ? `<div class="alert-box yellow" style="margin-top:8px">⏱ Evaluación solicitada hace <strong>${diasSolicitud} día(s)</strong> sin respuesta.</div>`
+      : '';
+
+    const pendientesHTML = muestraPendientes ? `
+      <div class="card compact" style="margin-top:8px;background:#fffbeb;border-left:4px solid #f59e0b">
+        <div class="row-between">
+          <strong>Pendientes derivados de la evaluación</strong>
+          <span class="tag ${faltanPend===0?'green':'yellow'}">${cumplPend}/${totalPend} cumplidos</span>
+        </div>
+        ${(evalPre.pendientes||[]).length===0
+          ? '<div class="muted" style="margin-top:6px">Sin pendientes registrados. Agrega los items que el evaluador pidió cumplir antes de cirugía.</div>'
+          : (evalPre.pendientes||[]).map(it => `
+              <div class="checkbox-row" style="margin-top:6px;gap:6px">
+                <input type="checkbox" ${it.cumplido?'checked':''}
+                  onchange="App.togglePendientePreop('${p.id}','${it.id}',this.checked)">
+                <input style="flex:1${it.cumplido?';text-decoration:line-through;opacity:.6':''}"
+                  value="${escapeHtml(it.texto||'')}"
+                  oninput="App.setPendientePreopTexto('${p.id}','${it.id}',this.value)">
+                <button class="btn-icon" title="Eliminar pendiente" onclick="App.delPendientePreop('${p.id}','${it.id}')">✕</button>
+              </div>
+            `).join('')
+        }
+        <div class="row-gap" style="margin-top:8px;flex-wrap:wrap">
+          <button class="btn small" onclick="App.addPendientePreop('${p.id}')">+ Pendiente</button>
+          <button class="btn small ghost" onclick="App.openPlantillasPendientesPreop('${p.id}')">📋 Plantilla</button>
+        </div>
+      </div>
+    ` : '';
+
     const evalBlock = `
       <div class="card compact">
         <div class="row-between">
-          <div class="row-gap">
-            <input type="checkbox" ${evalPre.realizado?'checked':''} onchange="App.toggleEstudio('${p.id}','evaluacionPreop',this.checked)">
-            <strong>Evaluación preoperatoria</strong>
-          </div>
-          ${evalPre.realizado?`<span class="tag green">Realizada</span>`:`<span class="tag red">Pendiente</span>`}
+          <strong>Evaluación preoperatoria</strong>
+          <span class="tag ${epCls}">${escapeHtml(epLabel)}${epEstado==='apto_condicional'&&faltanPend>0?` · ${faltanPend} pend.`:''}</span>
         </div>
-        ${evalPre.realizado?`
+        <div class="field" style="margin-top:8px;margin-bottom:0">
+          <label>Estado</label>
+          <select onchange="App.setEstadoEvalPreop('${p.id}',this.value)">
+            ${opcionesEstado}
+          </select>
+        </div>
+        ${muestraSolicitud?`
           <div class="field-row" style="margin-top:8px">
             <div class="field" style="margin-bottom:0">
-              <label>Fecha</label>
-              <input type="date" value="${escapeHtml(evalPre.fecha)}" onchange="App.setEstudioCampo('${p.id}','evaluacionPreop','fecha',this.value)">
+              <label>Fecha de solicitud</label>
+              <input type="date" value="${escapeHtml(evalPre.fechaSolicitud||'')}"
+                onchange="App.setEstudioCampo('${p.id}','evaluacionPreop','fechaSolicitud',this.value)">
             </div>
             <div class="field" style="margin-bottom:0">
               <label>Especialidad</label>
               <select onchange="App.setEstudioCampo('${p.id}','evaluacionPreop','especialidad',this.value)">
                 <option value="">—</option>
-                ${SPECIALIDADES_PREOP.map(s=>`<option ${evalPre.especialidad===s?'selected':''}>${s}</option>`).join('')}
+                ${SPECIALIDADES_PREOP.map(s=>`<option ${evalPre.especialidad===s?'selected':''}>${escapeHtml(s)}</option>`).join('')}
               </select>
             </div>
           </div>
+          ${avisoDemora}
+        `:''}
+        ${muestraResultado?`
+          <div class="field-row" style="margin-top:8px">
+            <div class="field" style="margin-bottom:0">
+              <label>Fecha de respuesta</label>
+              <input type="date" value="${escapeHtml(evalPre.fecha||'')}"
+                onchange="App.setEstudioCampo('${p.id}','evaluacionPreop','fecha',this.value)">
+            </div>
+          </div>
           <div class="field" style="margin-top:8px;margin-bottom:0">
-            <label>Conclusión / autorización</label>
-            <input value="${escapeHtml(evalPre.resultado)}" oninput="App.setEstudioCampo('${p.id}','evaluacionPreop','resultado',this.value)">
+            <label>Conclusión / recomendaciones</label>
+            <textarea rows="2" oninput="App.setEstudioCampo('${p.id}','evaluacionPreop','resultado',this.value)">${escapeHtml(evalPre.resultado||'')}</textarea>
           </div>
         `:''}
+        ${pendientesHTML}
       </div>
     `;
 
@@ -7259,6 +7497,137 @@ service cloud.firestore {
   setEstudioCampo(id, key, campo, val) {
     const p = this._findP(id); if (!p) return;
     p.estudios[key][campo] = val;
+    State.save();
+  },
+
+  /* ---- Evaluación preoperatoria tipificada (v3.20) ---- */
+  setEstadoEvalPreop(id, estado) {
+    const p = this._findP(id); if (!p) return;
+    const ep = getEvalPreop(p); if (!ep) return;
+    const previo = ep.estado || 'pendiente';
+    ep.estado = estado;
+    // Auto-completar fechas según estado
+    if (estado === 'solicitada' && !ep.fechaSolicitud) {
+      ep.fechaSolicitud = todayISO();
+    }
+    if (['apto','apto_condicional','no_apto_temporal','no_apto'].includes(estado) && !ep.fecha) {
+      ep.fecha = todayISO();
+    }
+    // Mantener flag legacy "realizado" coherente con el estado
+    ep.realizado = ['apto','apto_condicional','no_apto_temporal','no_apto'].includes(estado);
+    logCambio(p, 'Evaluación preop', `${preopEstadoLabel(previo)} → ${preopEstadoLabel(estado)}`);
+    State.save();
+    this.renderModal(id);
+  },
+
+  addPendientePreop(id, texto='') {
+    const p = this._findP(id); if (!p) return;
+    const ep = getEvalPreop(p); if (!ep) return;
+    if (!Array.isArray(ep.pendientes)) ep.pendientes = [];
+    ep.pendientes.push({
+      id: 'pp_' + uid(),
+      texto: texto || '',
+      cumplido: false,
+      fechaCreacion: todayISO(),
+      fechaCumplido: ''
+    });
+    if (texto) logCambio(p, 'Eval preop', `Pendiente agregado: ${texto}`);
+    State.save();
+    this.renderModal(id);
+  },
+
+  setPendientePreopTexto(id, pendId, texto) {
+    const p = this._findP(id); if (!p) return;
+    const ep = getEvalPreop(p); if (!ep) return;
+    const it = (ep.pendientes||[]).find(x => x.id === pendId);
+    if (!it) return;
+    it.texto = texto;
+    State.save();
+  },
+
+  togglePendientePreop(id, pendId, cumplido) {
+    const p = this._findP(id); if (!p) return;
+    const ep = getEvalPreop(p); if (!ep) return;
+    const it = (ep.pendientes||[]).find(x => x.id === pendId);
+    if (!it) return;
+    it.cumplido = cumplido;
+    it.fechaCumplido = cumplido ? todayISO() : '';
+    logCambio(p, 'Eval preop', `Pendiente ${cumplido?'cumplido':'reabierto'}: ${it.texto}`);
+    // Si todos los pendientes están cumplidos y estado es apto_condicional → auto-promover a apto
+    if (ep.estado === 'apto_condicional' && preopPendientesFaltan(ep) === 0 && (ep.pendientes||[]).length > 0) {
+      ep.estado = 'apto';
+      logCambio(p, 'Eval preop', 'Auto-promoción: todos los pendientes cumplidos → Apto sin condiciones');
+    }
+    State.save();
+    this.renderModal(id);
+  },
+
+  delPendientePreop(id, pendId) {
+    const p = this._findP(id); if (!p) return;
+    const ep = getEvalPreop(p); if (!ep) return;
+    const it = (ep.pendientes||[]).find(x => x.id === pendId);
+    ep.pendientes = (ep.pendientes||[]).filter(x => x.id !== pendId);
+    if (it) logCambio(p, 'Eval preop', `Pendiente eliminado: ${it.texto}`);
+    State.save();
+    this.renderModal(id);
+  },
+
+  openPlantillasPendientesPreop(id) {
+    const p = this._findP(id); if (!p) return;
+    const ep = getEvalPreop(p); if (!ep) return;
+    const yaTexto = new Set((ep.pendientes||[]).map(x => (x.texto||'').trim()));
+    const html = `
+      <div class="modal-backdrop" onclick="if(event.target===this) App._closeSecondary()">
+        <div class="modal" style="max-width:560px">
+          <div class="modal-head">
+            <div>
+              <div style="font-weight:600">Plantillas de pendientes</div>
+              <div style="font-size:.8rem;opacity:.9">Click para agregar a la lista. Los ya añadidos aparecen en gris.</div>
+            </div>
+            <button class="close-x" onclick="App._closeSecondary()">✕</button>
+          </div>
+          <div class="modal-body">
+            <div class="catalog-grid">
+              ${PLANTILLAS_PENDIENTES_PREOP.map(t => `
+                <div class="catalog-item ${yaTexto.has(t)?'selected':''}"
+                  onclick="App._aplicarPlantillaPendientePreop('${id}','${escapeHtml(t).replace(/'/g,'&apos;')}',this)">
+                  ${escapeHtml(t)}
+                </div>
+              `).join('')}
+            </div>
+          </div>
+          <div class="modal-foot">
+            <div style="flex:1"></div>
+            <button class="btn success" onclick="App._closeSecondary()">✓ Listo</button>
+          </div>
+        </div>
+      </div>
+    `;
+    this._renderSecondary(html);
+  },
+
+  _aplicarPlantillaPendientePreop(id, texto, el) {
+    const p = this._findP(id); if (!p) return;
+    const ep = getEvalPreop(p); if (!ep) return;
+    if (!Array.isArray(ep.pendientes)) ep.pendientes = [];
+    texto = texto.replace(/&apos;/g, "'");
+    const idx = ep.pendientes.findIndex(x => (x.texto||'').trim() === texto);
+    if (idx >= 0) {
+      // toggle off
+      ep.pendientes.splice(idx, 1);
+      el.classList.remove('selected');
+      logCambio(p, 'Eval preop', `Pendiente quitado: ${texto}`);
+    } else {
+      ep.pendientes.push({
+        id: 'pp_' + uid(),
+        texto,
+        cumplido: false,
+        fechaCreacion: todayISO(),
+        fechaCumplido: ''
+      });
+      el.classList.add('selected');
+      logCambio(p, 'Eval preop', `Pendiente agregado: ${texto}`);
+    }
     State.save();
   },
 
