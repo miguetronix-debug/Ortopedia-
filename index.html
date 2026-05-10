@@ -619,6 +619,7 @@
   <button data-tab="lista" class="active" onclick="App.switchTab('lista')">Pase de visita</button>
   <button data-tab="resumen" onclick="App.switchTab('resumen')">Pendientes <span class="badge" id="resumenCount" style="display:none">0</span></button>
   <button data-tab="cirugia" onclick="App.switchTab('cirugia')">Listos para cirugía</button>
+  <button data-tab="lespera" onclick="App.switchTab('lespera')">Ambulatorios <span class="badge" id="lesperaCount" style="display:none">0</span></button>
   <button data-tab="programa" onclick="App.switchTab('programa')">Programa Qx</button>
   <button data-tab="icrecibidas" onclick="App.switchTab('icrecibidas')">IC Recibidas <span class="badge" id="icRecCount" style="display:none">0</span></button>
   <button data-tab="salidas" onclick="App.switchTab('salidas')">Salida</button>
@@ -639,7 +640,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.14-quitar-todos-2026-05-10';
+const APP_VERSION = 'v3.16-tipo-al-crear-2026-05-10';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -864,6 +865,10 @@ function nuevoPaciente() {
     fechaIngreso: todayISO(),
     fechaEgreso: '',
     cirujano: '',
+    enListaEspera: false,         // true = paciente ambulatorio en espera de cirugía
+    fechaListaEspera: '',         // cuándo se agregó a la lista de espera
+    prioridadListaEspera: 'normal', // alta | normal | baja
+    notasListaEspera: '',         // datos de contacto, comentarios
     diagnosticos: [],
     alergias: '',
     antecedentesPatologicos: '',
@@ -1690,6 +1695,10 @@ const State = {
     data.patients.forEach(p => {
       // Defaults para nuevos campos (v3.8) — pacientes anteriores no los tenían
       if (p.ubicacion === undefined) p.ubicacion = '';
+      if (p.enListaEspera === undefined) p.enListaEspera = false;
+      if (p.fechaListaEspera === undefined) p.fechaListaEspera = '';
+      if (p.prioridadListaEspera === undefined) p.prioridadListaEspera = 'normal';
+      if (p.notasListaEspera === undefined) p.notasListaEspera = '';
       if (p.hospitalizacionesPrevias === undefined) p.hospitalizacionesPrevias = '';
       if (p.traumatismosPrevios === undefined) p.traumatismosPrevios = '';
       if (p.usaAditamentos === undefined) p.usaAditamentos = '';
@@ -2804,6 +2813,17 @@ service cloud.firestore {
         icBadge.style.display = 'none';
       }
     }
+    // Badge de Ambulatorios: cuántos están en lista
+    const enLEspera = State.data.patients.filter(p => p.enListaEspera && !p.fechaEgreso).length;
+    const lesperaBadge = document.getElementById('lesperaCount');
+    if (lesperaBadge) {
+      if (enLEspera > 0) {
+        lesperaBadge.style.display = 'inline-block';
+        lesperaBadge.textContent = enLEspera;
+      } else {
+        lesperaBadge.style.display = 'none';
+      }
+    }
     // Badge de Resumen: cantidad de pacientes con pendientes
     const conPend = State.data.patients.filter(p => !p.fechaEgreso)
       .filter(p => calcularPendientesPaciente(p).length > 0).length;
@@ -2832,6 +2852,7 @@ service cloud.firestore {
     if (t === 'lista') view.innerHTML = this.renderLista(false);
     else if (t === 'resumen') view.innerHTML = this.renderResumen();
     else if (t === 'cirugia') view.innerHTML = this.renderCirugia();
+    else if (t === 'lespera') view.innerHTML = this.renderListaEspera();
     else if (t === 'programa') view.innerHTML = this.renderPrograma();
     else if (t === 'icrecibidas') view.innerHTML = this.renderICRecibidas();
     else if (t === 'salidas') view.innerHTML = this.renderSalidas();
@@ -2925,7 +2946,9 @@ service cloud.firestore {
   },
 
   _countsPorFiltro(incluirEgresados) {
-    const base = State.data.patients.filter(p => incluirEgresados || !p.fechaEgreso);
+    const base = State.data.patients
+      .filter(p => !p.enListaEspera)
+      .filter(p => incluirEgresados || !p.fechaEgreso);
     const hoy = todayISO();
     const programaHoy = (State.data.programas || []).find(prg => prg.fecha === hoy);
     const idsHoy = new Set(programaHoy ? programaHoy.pacientes.map(e => e.pacienteId) : []);
@@ -3007,6 +3030,7 @@ service cloud.firestore {
   // sin destruir el input y por lo tanto sin perder el foco del teclado.
   renderPatientListContent(incluirEgresados) {
     const pacientes = State.data.patients
+      .filter(p => !p.enListaEspera)  // los ambulatorios en espera tienen su propia pestaña
       .filter(p => incluirEgresados || !p.fechaEgreso)
       .filter(p => this.matchesFilter(p))
       .filter(p => this.matchesSearch(p))
@@ -3172,6 +3196,110 @@ service cloud.firestore {
       ...(p.diagnosticos||[])
     ].join(' ').toLowerCase();
     return blob.includes(q);
+  },
+
+  /* ---------- Lista de espera quirúrgica (ambulatorios) ---------- */
+  renderListaEspera() {
+    const lista = State.data.patients
+      .filter(p => p.enListaEspera && !p.fechaEgreso)
+      .filter(p => this.matchesSearch(p))
+      .sort((a,b) => {
+        // Prioridad: alta > normal > baja
+        const pri = { alta:0, normal:1, baja:2 };
+        const pa = pri[a.prioridadListaEspera||'normal'];
+        const pb = pri[b.prioridadListaEspera||'normal'];
+        if (pa !== pb) return pa - pb;
+        // Fecha de inscripción (más antiguos primero)
+        return (a.fechaListaEspera||'').localeCompare(b.fechaListaEspera||'');
+      });
+
+    let html = `
+      <div class="toolbar no-print">
+        <h2 style="margin:0">Pacientes ambulatorios (${lista.length})</h2>
+        <div style="flex:1"></div>
+        <button class="btn small" onclick="App.openNewAmbulatorio()">+ Nuevo ambulatorio</button>
+        <button class="btn ghost small" onclick="window.print()">🖨</button>
+      </div>
+      <div class="alert-box blue no-print" style="font-size:.85rem">
+        Pacientes ambulatorios pendientes de cirugía (no hospitalizados aún).
+        Ordenados por <strong>prioridad</strong> (alta → baja) y fecha de inscripción.
+        Cuando completen su preoperatorio se pueden agregar al programa quirúrgico
+        igual que un paciente hospitalizado. Si requieren ingreso, usa "Ingresar al hospital".
+      </div>
+
+      <div class="toolbar no-print">
+        <input type="search" placeholder="Buscar por nombre, cédula, dx..." value="${escapeHtml(State.search)}"
+          oninput="App.setSearch(this.value)">
+      </div>
+    `;
+
+    if (lista.length === 0) {
+      html += `<div class="empty">
+        <div class="ico">📅</div>
+        <div>No hay pacientes en lista de espera.</div>
+        <div style="margin-top:10px"><button class="btn" onclick="App.openNewAmbulatorio()">+ Agregar paciente ambulatorio</button></div>
+      </div>`;
+      return html;
+    }
+
+    html += lista.map(p => {
+      const apto = evaluarAptoCirugia(p);
+      const dias = p.fechaListaEspera ? daysBetween(p.fechaListaEspera) : 0;
+      const priColor = p.prioridadListaEspera === 'alta' ? 'red' : (p.prioridadListaEspera === 'baja' ? 'gray' : 'yellow');
+      let cls = 'patient-card';
+      if (apto.listo) cls += ' ready';
+      if (p.prioridadListaEspera === 'alta' && !apto.listo) cls += ' alert';
+      return `
+        <div class="${cls}" onclick="App.openPaciente('${p.id}')" style="margin-bottom:10px">
+          <div class="pc-row">
+            <div class="pc-info">
+              <div class="pc-name">${escapeHtml(p.nombre || '(sin nombre)')}
+                <span class="tag ${priColor}">Prioridad ${escapeHtml(p.prioridadListaEspera||'normal')}</span>
+                ${apto.listo
+                  ? '<span class="tag green">✓ Listo cirugía</span>'
+                  : '<span class="tag red">Pendiente preop</span>'}
+              </div>
+              <div class="pc-meta">
+                ${escapeHtml(p.cedula||'—')} · ${escapeHtml(p.edad||'?')} años · ${escapeHtml(p.cirujano||'sin cirujano')}
+                ${dias > 0 ? ` · En lista hace ${dias} día(s)` : ''}
+              </div>
+              <div class="pc-meta" style="margin-top:4px">
+                <strong>Dx:</strong> ${escapeHtml((p.diagnosticos||[]).join(', ') || '—')}
+              </div>
+              ${p.notasListaEspera ? `<div class="pc-meta" style="margin-top:4px"><em>${escapeHtml(p.notasListaEspera)}</em></div>` : ''}
+              ${!apto.listo && apto.faltantes && apto.faltantes.length
+                ? `<div class="pc-meta" style="color:#92400e;margin-top:4px">Faltan: ${escapeHtml(apto.faltantes.join(', '))}</div>`
+                : ''}
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    return html;
+  },
+
+  ingresarAlHospital(id) {
+    const p = this._findP(id); if (!p) return;
+    if (!p.enListaEspera) { alert('El paciente ya está hospitalizado.'); return; }
+    if (!confirm('¿Ingresar este paciente al hospital? Saldrá de la lista de espera y aparecerá en el pase de visita. Necesitará asignación de cama.')) return;
+    p.enListaEspera = false;
+    if (!p.fechaIngreso) p.fechaIngreso = todayISO();
+    logCambio(p, 'Hospitalización', 'Convertido de lista de espera a hospitalizado');
+    State.save();
+    this.renderModal(id);
+  },
+
+  moverAListaEspera(id) {
+    const p = this._findP(id); if (!p) return;
+    if (p.enListaEspera) { alert('Ya está en lista de espera.'); return; }
+    if (!confirm('¿Mover este paciente a lista de espera? Saldrá del pase de visita.')) return;
+    p.enListaEspera = true;
+    if (!p.fechaListaEspera) p.fechaListaEspera = todayISO();
+    p.cama = '';
+    logCambio(p, 'Lista espera', 'Movido de hospitalizado a lista de espera');
+    State.save();
+    this.renderModal(id);
   },
 
   /* ---------- Listos para cirugía ---------- */
@@ -3655,7 +3783,13 @@ service cloud.firestore {
       .filter(p => !p.fechaEgreso)
       .filter(p => !yaEnPrg.has(p.id))
       .filter(p => evaluarAptoCirugia(p).listo)
-      .sort((a,b) => this._compararPacientes(a,b));
+      .sort((a,b) => {
+        // Hospitalizados primero, luego ambulatorios
+        const ah = a.enListaEspera ? 1 : 0;
+        const bh = b.enListaEspera ? 1 : 0;
+        if (ah !== bh) return ah - bh;
+        return this._compararPacientes(a,b);
+      });
 
     // Para informar al usuario cuántos pacientes hay pendientes (no aptos) y por qué
     const noAptos = State.data.patients
@@ -3685,10 +3819,13 @@ service cloud.firestore {
               ${candidatos.map(p => `
                 <div class="patient-card ready" onclick="App.confirmarAgregarPrograma('${prg.id}','${p.id}')">
                   <div class="pc-row">
-                    <div class="pc-bed">${escapeHtml(p.cama||'?')}</div>
+                    <div class="pc-bed">${p.enListaEspera ? '🚶' : escapeHtml(p.cama||'?')}</div>
                     <div class="pc-info">
                       <div class="pc-name">${escapeHtml(p.nombre||'(sin nombre)')}
                         <span class="tag green">Listo</span>
+                        ${p.enListaEspera
+                          ? '<span class="tag blue">Ambulatorio</span>'
+                          : '<span class="tag gray">Hospitalizado</span>'}
                       </div>
                       <div class="pc-meta">${escapeHtml(p.cedula||'—')} · ${escapeHtml(p.edad||'?')} años</div>
                       <div class="pc-meta"><strong>Dx:</strong> ${escapeHtml((p.diagnosticos||[]).join(', ')||'—')}</div>
@@ -5818,14 +5955,65 @@ service cloud.firestore {
   _modalSubtab: 'datos',
 
   openNew() {
-    debounceAction('openNew', () => {
+    // Mostrar selector de tipo de paciente antes de crear
+    const html = `
+      <div class="modal-backdrop" onclick="if(event.target===this) App._closeSecondary()">
+        <div class="modal" style="max-width:520px">
+          <div class="modal-head">
+            <div>
+              <div style="font-weight:600">Crear nuevo paciente</div>
+              <div style="font-size:.8rem;opacity:.9">¿Qué tipo de paciente vas a registrar?</div>
+            </div>
+            <button class="close-x" onclick="App._closeSecondary()">✕</button>
+          </div>
+          <div class="modal-body">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px">
+              <button class="btn success" style="padding:24px 16px;display:flex;flex-direction:column;align-items:center;gap:6px"
+                onclick="App._closeSecondary();App._crearPaciente(false)">
+                <div style="font-size:2rem">🏥</div>
+                <div style="font-size:1rem;font-weight:600">Hospitalizado</div>
+                <div style="font-size:.8rem;font-weight:400;opacity:.9">Paciente con cama asignada</div>
+              </button>
+              <button class="btn" style="padding:24px 16px;display:flex;flex-direction:column;align-items:center;gap:6px"
+                onclick="App._closeSecondary();App._crearPaciente(true)">
+                <div style="font-size:2rem">🚶</div>
+                <div style="font-size:1rem;font-weight:600">Ambulatorio</div>
+                <div style="font-size:.8rem;font-weight:400;opacity:.9">En espera de cirugía</div>
+              </button>
+            </div>
+            <div class="muted" style="font-size:.85rem;margin-top:14px;text-align:center">
+              Después puedes cambiar el tipo desde la ficha del paciente.
+            </div>
+          </div>
+          <div class="modal-foot">
+            <button class="btn ghost" onclick="App._closeSecondary()">Cancelar</button>
+          </div>
+        </div>
+      </div>
+    `;
+    this._renderSecondary(html);
+  },
+
+  _crearPaciente(esAmbulatorio) {
+    debounceAction('crearPaciente', () => {
       const p = nuevoPaciente();
+      if (esAmbulatorio) {
+        p.enListaEspera = true;
+        p.fechaListaEspera = todayISO();
+        p.fechaIngreso = '';
+        p.cama = '';
+      }
       State.data.patients.push(p);
-      logCambio(p, 'Creación', 'Paciente creado');
+      logCambio(p, 'Creación', 'Paciente creado · ' + (esAmbulatorio?'ambulatorio':'hospitalizado'));
       State.save();
       this._modalSubtab = 'datos';
       this.openPaciente(p.id);
     });
+  },
+
+  // Compatibilidad: openNewAmbulatorio sigue funcionando (sin pasar por modal)
+  openNewAmbulatorio() {
+    this._crearPaciente(true);
   },
 
   openPaciente(id) {
@@ -5940,8 +6128,43 @@ service cloud.firestore {
     const nombreInvalido = !p.nombre || !p.nombre.trim();
     const cedulaInvalida = !p.cedula || !p.cedula.trim();
     const cedulaDup = errores.some(e => e.startsWith('Cédula duplicada'));
+    const ambulatorio = !!p.enListaEspera;
     return `
       ${errBox}
+      <div class="card" style="border-left:4px solid ${ambulatorio?'#3282b8':'#059669'}">
+        <h3>Tipo de paciente</h3>
+        <div class="row-gap">
+          ${ambulatorio
+            ? `<span class="tag blue">🚶 Ambulatorio (en espera de cirugía)</span>
+               <button class="btn small" onclick="App.ingresarAlHospital('${p.id}')">→ Ingresar al hospital</button>`
+            : `<span class="tag green">🏥 Hospitalizado</span>
+               <button class="btn ghost small" onclick="App.moverAListaEspera('${p.id}')">→ Mover a ambulatorios</button>`}
+        </div>
+        ${ambulatorio ? `
+          <div class="field-row" style="margin-top:8px">
+            <div class="field" style="margin-bottom:0">
+              <label>Prioridad</label>
+              <select onchange="App.actualizar('${p.id}','prioridadListaEspera',this.value)">
+                <option value="alta" ${p.prioridadListaEspera==='alta'?'selected':''}>Alta</option>
+                <option value="normal" ${p.prioridadListaEspera==='normal'?'selected':''}>Normal</option>
+                <option value="baja" ${p.prioridadListaEspera==='baja'?'selected':''}>Baja</option>
+              </select>
+            </div>
+            <div class="field" style="margin-bottom:0">
+              <label>Fecha inscripción a lista</label>
+              <input type="date" value="${escapeHtml(p.fechaListaEspera||'')}"
+                onchange="App.actualizar('${p.id}','fechaListaEspera',this.value)">
+            </div>
+          </div>
+          <div class="field" style="margin-top:8px;margin-bottom:0">
+            <label>Notas (contacto, comentarios)</label>
+            <input value="${escapeHtml(p.notasListaEspera||'')}"
+              placeholder="Ej. teléfono de contacto, viene desde consulta de Dr. X"
+              oninput="App.actualizar('${p.id}','notasListaEspera',this.value)">
+          </div>
+        ` : ''}
+      </div>
+
       <div class="card">
         <div class="field-row">
           <div class="field">
