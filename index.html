@@ -640,7 +640,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.16-tipo-al-crear-2026-05-10';
+const APP_VERSION = 'v3.17-tag-programado-2026-05-10';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -1209,6 +1209,21 @@ function esSano(p) {
     'i'
   );
   return re.test(app);
+}
+
+// Devuelve {programa, entrada} si el paciente está en un programa quirúrgico futuro
+// (o de hoy) con operado=null. Es decir: programado y aún no operado.
+function getProgramacionPendiente(p) {
+  if (!p || !p.id) return null;
+  const hoy = todayISO();
+  const programas = (State.data.programas || [])
+    .filter(prg => prg.fecha >= hoy)
+    .sort((a,b) => (a.fecha||'').localeCompare(b.fecha||''));
+  for (const prg of programas) {
+    const e = (prg.pacientes || []).find(en => en.pacienteId === p.id && en.operado === null);
+    if (e) return { programa: prg, entrada: e };
+  }
+  return null;
 }
 
 // Calcula los pendientes de un paciente para vista Resumen
@@ -3098,11 +3113,15 @@ service cloud.firestore {
     if (p.fechaEgreso) cls += ' muted';
 
     const dxList = (p.diagnosticos || []).join(', ');
+    const progPend = getProgramacionPendiente(p);
     let estadoTag = '';
     if (operado && requiereOtra) {
       estadoTag = `<span class="tag green">Operado · día ${dpostop} postop</span> <span class="tag yellow">Pendiente otra cirugía</span>`;
+      if (progPend) estadoTag += ` <span class="tag blue">📅 Próx: ${fmtDate(progPend.programa.fecha)}${progPend.entrada.quirofano?' · Q'+escapeHtml(progPend.entrada.quirofano):''}</span>`;
     } else if (operado) {
       estadoTag = `<span class="tag green">Operado · día ${dpostop} postop${cirugiasArr.length>1?` (${cirugiasArr.length} cirugías)`:''}</span>`;
+    } else if (progPend) {
+      estadoTag = `<span class="tag blue">📅 Programado · ${fmtDate(progPend.programa.fecha)}${progPend.entrada.quirofano?' · Q'+escapeHtml(progPend.entrada.quirofano):''}${progPend.entrada.orden?' #'+progPend.entrada.orden:''}</span>`;
     } else if (apto.listo) {
       estadoTag = '<span class="tag green">Listo cirugía</span>';
     } else {
@@ -3246,18 +3265,23 @@ service cloud.firestore {
       const apto = evaluarAptoCirugia(p);
       const dias = p.fechaListaEspera ? daysBetween(p.fechaListaEspera) : 0;
       const priColor = p.prioridadListaEspera === 'alta' ? 'red' : (p.prioridadListaEspera === 'baja' ? 'gray' : 'yellow');
+      const progPend = getProgramacionPendiente(p);
       let cls = 'patient-card';
-      if (apto.listo) cls += ' ready';
-      if (p.prioridadListaEspera === 'alta' && !apto.listo) cls += ' alert';
+      if (progPend) cls += ' ready';
+      else if (apto.listo) cls += ' ready';
+      if (p.prioridadListaEspera === 'alta' && !apto.listo && !progPend) cls += ' alert';
+      const estadoTag = progPend
+        ? `<span class="tag blue">📅 Programado · ${fmtDate(progPend.programa.fecha)}${progPend.entrada.quirofano?' · Q'+escapeHtml(progPend.entrada.quirofano):''}</span>`
+        : (apto.listo
+            ? '<span class="tag green">✓ Listo cirugía</span>'
+            : '<span class="tag red">Pendiente preop</span>');
       return `
         <div class="${cls}" onclick="App.openPaciente('${p.id}')" style="margin-bottom:10px">
           <div class="pc-row">
             <div class="pc-info">
               <div class="pc-name">${escapeHtml(p.nombre || '(sin nombre)')}
                 <span class="tag ${priColor}">Prioridad ${escapeHtml(p.prioridadListaEspera||'normal')}</span>
-                ${apto.listo
-                  ? '<span class="tag green">✓ Listo cirugía</span>'
-                  : '<span class="tag red">Pendiente preop</span>'}
+                ${estadoTag}
               </div>
               <div class="pc-meta">
                 ${escapeHtml(p.cedula||'—')} · ${escapeHtml(p.edad||'?')} años · ${escapeHtml(p.cirujano||'sin cirujano')}
@@ -6075,15 +6099,20 @@ service cloud.firestore {
     else if (this._modalSubtab === 'hist') bodyHtml = this.tabHist(p);
 
     const erroresValidacion = validarPaciente(p);
+    const progPendModal = getProgramacionPendiente(p);
     const aptoBadge = (erroresValidacion.length > 0)
       ? `<span class="pill notready">⚠ Datos incompletos</span>`
-      : apto.listo
-        ? `<span class="pill ready">✓ Listo cirugía</span>`
-        : apto.operado
-          ? (p.requiereOtraCirugia
-              ? `<span class="pill pending">Operado · pendiente otra cirugía</span>`
-              : `<span class="pill ready">✓ Operado</span>`)
-          : (tieneContraindicacion(p) ? `<span class="pill notready">No apto</span>` : `<span class="pill pending">Pendiente</span>`);
+      : (progPendModal && !apto.operado)
+        ? `<span class="pill" style="background:#dbeafe;color:#1e3a8a">📅 Programado · ${fmtDate(progPendModal.programa.fecha)}${progPendModal.entrada.quirofano?' · Q'+escapeHtml(progPendModal.entrada.quirofano):''}</span>`
+        : apto.listo
+          ? `<span class="pill ready">✓ Listo cirugía</span>`
+          : apto.operado
+            ? (p.requiereOtraCirugia
+                ? (progPendModal
+                    ? `<span class="pill" style="background:#dbeafe;color:#1e3a8a">📅 Reoperación programada · ${fmtDate(progPendModal.programa.fecha)}</span>`
+                    : `<span class="pill pending">Operado · pendiente otra cirugía</span>`)
+                : `<span class="pill ready">✓ Operado</span>`)
+            : (tieneContraindicacion(p) ? `<span class="pill notready">No apto</span>` : `<span class="pill pending">Pendiente</span>`);
 
     const html = `
       <div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">
@@ -7171,15 +7200,20 @@ service cloud.firestore {
       const apto = evaluarAptoCirugia(p);
       const dias = daysBetween(p.fechaIngreso);
       const erroresValidacionH = validarPaciente(p);
+      const progPendH = getProgramacionPendiente(p);
       const aptoBadge = (erroresValidacionH.length > 0)
         ? `<span class="pill notready">⚠ Datos incompletos</span>`
-        : apto.listo
-          ? `<span class="pill ready">✓ Listo cirugía</span>`
-          : apto.operado
-            ? (p.requiereOtraCirugia
-                ? `<span class="pill pending">Operado · pendiente otra cirugía</span>`
-                : `<span class="pill ready">✓ Operado</span>`)
-            : (tieneContraindicacion(p) ? `<span class="pill notready">No apto</span>` : `<span class="pill pending">Pendiente</span>`);
+        : (progPendH && !apto.operado)
+          ? `<span class="pill" style="background:#dbeafe;color:#1e3a8a">📅 Programado · ${fmtDate(progPendH.programa.fecha)}${progPendH.entrada.quirofano?' · Q'+escapeHtml(progPendH.entrada.quirofano):''}</span>`
+          : apto.listo
+            ? `<span class="pill ready">✓ Listo cirugía</span>`
+            : apto.operado
+              ? (p.requiereOtraCirugia
+                  ? (progPendH
+                      ? `<span class="pill" style="background:#dbeafe;color:#1e3a8a">📅 Reoperación programada · ${fmtDate(progPendH.programa.fecha)}</span>`
+                      : `<span class="pill pending">Operado · pendiente otra cirugía</span>`)
+                  : `<span class="pill ready">✓ Operado</span>`)
+              : (tieneContraindicacion(p) ? `<span class="pill notready">No apto</span>` : `<span class="pill pending">Pendiente</span>`);
       head.innerHTML = `
         <div>
           <div style="font-weight:600">${escapeHtml(p.nombre || '(Nuevo paciente)')}</div>
