@@ -519,7 +519,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.8-evolucion-resumen-tpn-2026-05-09';
+const APP_VERSION = 'v3.9-fix-orden-dih-2026-05-09';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -2580,11 +2580,13 @@ service cloud.firestore {
       <div class="toolbar no-print">
         <input type="search" id="searchInput" placeholder="Buscar por nombre, cédula, cama, dx, cirujano..." value="${escapeHtml(State.search)}"
                oninput="App.setSearch(this.value)">
-        <button class="btn ghost small" onclick="App.toggleSort('cama')" title="Ordenar por número de cama">
+        <button class="btn ${State.sortBy==='cama'?'':'ghost'} small" onclick="App.toggleSort('cama')"
+          title="Ordenar por número de cama (click para alternar ↑↓)">
           Cama ${State.sortBy==='cama'?(State.sortDir==='asc'?'↑':'↓'):''}
         </button>
-        <button class="btn ghost small" onclick="App.toggleSort('dih')" title="Ordenar por días intra-hospitalarios">
-          DIH ${State.sortBy==='dih'?(State.sortDir==='asc'?'↑':'↓'):''}
+        <button class="btn ${State.sortBy==='dih'?'':'ghost'} small" onclick="App.toggleSort('dih')"
+          title="Ordenar por días intra-hospitalarios (click para alternar ↑↓)">
+          DIH ${State.sortBy==='dih'?(State.sortDir==='desc'?'↓ (más días arriba)':'↑ (menos días arriba)'):''}
         </button>
         <button class="btn ghost small" onclick="window.print()">🖨 Imprimir</button>
       </div>
@@ -2800,12 +2802,12 @@ service cloud.firestore {
 
   toggleSort(campo) {
     if (State.sortBy === campo) {
-      // Alternar dirección. Para DIH solo permitimos ascendente (según especificación).
-      if (campo === 'dih') return;
+      // Alternar dirección
       State.sortDir = State.sortDir === 'asc' ? 'desc' : 'asc';
     } else {
       State.sortBy = campo;
-      State.sortDir = 'asc';
+      // Default: cama asc, DIH desc (más útil clínicamente: ver primero los que llevan más días)
+      State.sortDir = (campo === 'dih') ? 'desc' : 'asc';
     }
     this.render();
   },
@@ -3316,7 +3318,7 @@ service cloud.firestore {
       .filter(p => !p.fechaEgreso)
       .filter(p => !yaEnPrg.has(p.id))
       .filter(p => evaluarAptoCirugia(p).listo)
-      .sort((a,b) => (a.cama||'').localeCompare(b.cama||'', 'es', {numeric:true}));
+      .sort((a,b) => this._compararPacientes(a,b));
 
     // Para informar al usuario cuántos pacientes hay pendientes (no aptos) y por qué
     const noAptos = State.data.patients
