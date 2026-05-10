@@ -496,6 +496,7 @@
 
 <nav class="tabs no-print" id="tabs">
   <button data-tab="lista" class="active" onclick="App.switchTab('lista')">Pase de visita</button>
+  <button data-tab="resumen" onclick="App.switchTab('resumen')">Resumen <span class="badge" id="resumenCount" style="display:none">0</span></button>
   <button data-tab="cirugia" onclick="App.switchTab('cirugia')">Listos para cirugía</button>
   <button data-tab="programa" onclick="App.switchTab('programa')">Programa Qx</button>
   <button data-tab="icrecibidas" onclick="App.switchTab('icrecibidas')">IC Recibidas <span class="badge" id="icRecCount" style="display:none">0</span></button>
@@ -518,7 +519,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.6-ic-recibidas-2026-05-09';
+const APP_VERSION = 'v3.8-evolucion-resumen-tpn-2026-05-09';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -678,6 +679,8 @@ const SEED_ESQUEMAS_EGRESO = [
   }
 ];
 
+const SEED_UBICACIONES = ['CIDELAS', 'CHDRAAM'];
+
 const SEED_CIRUJANOS = [
   'Dr. Enrique Espinosa', 'Dra. Karla Vargas', 'Dr. Michael Kushner',
   'Dr. José Luis Moreno', 'Dr. Rodrigo Espino', 'Dr. Ricardo Gutiérrez',
@@ -722,6 +725,7 @@ function nuevoPaciente() {
     cedula: '',
     edad: '',
     sexo: '',
+    ubicacion: '',         // CIDELAS / CHDRAAM / Otra
     cama: '',
     telefono: '',
     contactoEmergencia: '',
@@ -732,6 +736,29 @@ function nuevoPaciente() {
     alergias: '',
     antecedentesPatologicos: '',
     antecedentesQuirurgicos: '',
+    hospitalizacionesPrevias: '',
+    traumatismosPrevios: '',
+    usaAditamentos: '',         // muletas, andadera, silla de ruedas, ninguno
+    sustancias: {
+      alcoholismo: { activo:false, detalle:'' },
+      tabaquismo: { activo:false, detalle:'' },
+      drogas: { activo:false, detalle:'' }
+    },
+    curaciones: {
+      requiere: false,
+      frecuencia: '',           // 24h | 48h | 72h
+      ultimaFecha: '',          // ISO date opcional
+      notas: ''
+    },
+    tpn: {
+      activa: false,
+      fechaInicio: '',          // ISO date — cuándo se colocó (cuenta días totales)
+      ultimoCambio: '',         // ISO date — último cambio de apósito (cada 3 días)
+      ubicacion: '',            // dónde está colocada (ej. "tibia derecha", "muñón")
+      presion: '',              // mmHg (ej. "125", "75-125")
+      notas: ''
+    },
+    evoluciones: [],            // [{id, fecha (ISO datetime), texto, autor, modificado}]
     medicamentosPrevios: '',
     observaciones: '',
     contraindicaciones: {
@@ -996,6 +1023,99 @@ const SERVICIOS_SOLICITANTES = [
 ];
 
 const URGENCIAS_IC = ['urgente', 'prioritario', 'rutina'];
+
+/* ---------- Helpers para nuevos campos (TPN VAC, evolución, sano) ---------- */
+// Días totales desde que se colocó la TPN (Terapia de Presión Negativa / VAC)
+function diasTPN(p) {
+  if (!p.tpn || !p.tpn.activa || !p.tpn.fechaInicio) return null;
+  const fin = (p.fechaEgreso && p.fechaEgreso >= p.tpn.fechaInicio) ? p.fechaEgreso : null;
+  return daysBetween(p.tpn.fechaInicio, fin);
+}
+// Días desde el último cambio de apósito VAC (típicamente cada 3 días)
+function diasDesdeUltimoCambioTPN(p) {
+  if (!p.tpn || !p.tpn.activa) return null;
+  const ref = p.tpn.ultimoCambio || p.tpn.fechaInicio;
+  if (!ref) return null;
+  return daysBetween(ref);
+}
+
+function ultimaEvolucion(p) {
+  const evs = p.evoluciones || [];
+  if (evs.length === 0) return null;
+  return evs.slice().sort((a,b) => (b.fecha||'').localeCompare(a.fecha||''))[0];
+}
+
+function tieneEvolucionHoy(p) {
+  const ult = ultimaEvolucion(p);
+  if (!ult) return false;
+  return (ult.fecha||'').slice(0,10) === todayISO();
+}
+
+// Detecta si los antecedentes patológicos son básicamente "ninguno".
+// IMPORTANTE: sólo se considera sano si el campo COMPLETO es una negación limpia.
+// Si dice algo específico además ("niega DM, padece HTA"), NO es sano.
+function esSano(p) {
+  const app = (p.antecedentesPatologicos || '').toLowerCase().trim();
+  if (!app) return true;  // vacío = sano
+  // Patrones limpios de negación (el campo completo debe ser una de estas frases)
+  const re = new RegExp(
+    '^\\s*(' +
+      'niega|niego|niegan|' +
+      'no|nada|sano|sana|' +
+      'ninguno|ninguna|' +
+      'sin\\s+(app|antecedentes|antecedentes\\s+patol[oó]gicos|antecedentes\\s+m[eé]dicos|app\\s+de\\s+relevancia)|' +
+      'niega\\s+(app|antecedentes|antecedentes\\s+patol[oó]gicos|antecedentes\\s+m[eé]dicos|de\\s+relevancia)|' +
+      'no\\s+(refiere|tiene|presenta|hay|conocidos?|app|antecedentes|de\\s+relevancia)|' +
+      '\\(?\\s*-\\s*\\)?' +
+    ')\\s*\\.?\\s*$',
+    'i'
+  );
+  return re.test(app);
+}
+
+// Calcula los pendientes de un paciente para vista Resumen
+function calcularPendientesPaciente(p) {
+  const pendientes = [];
+  // Estudios faltantes
+  const apto = evaluarAptoCirugia(p);
+  if (apto.faltantes && apto.faltantes.length > 0) {
+    pendientes.push({ tipo:'estudios', desc:'Faltan estudios: ' + apto.faltantes.join(', ') });
+  }
+  // IC sin responder
+  (p.interconsultas||[]).forEach(ic => {
+    if (!ic.respondida) {
+      const dias = daysBetween(ic.fechaSolicitud);
+      pendientes.push({ tipo:'ic', desc:`IC ${ic.servicio} sin responder (${dias} día${dias!==1?'s':''})` });
+    }
+  });
+  // Control infección a 7 días
+  if (tieneInfeccion(p)) {
+    const dias = daysBetween(p.fechaIngreso);
+    if (dias >= 7) {
+      const ult = (p.controlInfeccion || []).slice().sort((a,b)=>b.fecha.localeCompare(a.fecha))[0];
+      const diasUlt = ult ? daysBetween(ult.fecha) : dias;
+      if (!ult || diasUlt >= 7) {
+        pendientes.push({ tipo:'infeccion', desc:`Repetir Rx + exámenes control infección (último: ${ult?fmtDate(ult.fecha):'nunca'})` });
+      }
+    }
+  }
+  // Curaciones (toggle requiere y frecuencia configurada)
+  if (p.curaciones && p.curaciones.requiere && p.curaciones.frecuencia) {
+    pendientes.push({ tipo:'curacion', desc:`Curación cada ${p.curaciones.frecuencia}${p.curaciones.ultimaFecha?' (última: '+fmtDate(p.curaciones.ultimaFecha)+')':''}` });
+  }
+  // TPN (presión negativa / VAC): cambio de apósito cada 3 días
+  if (p.tpn && p.tpn.activa) {
+    const dCambio = diasDesdeUltimoCambioTPN(p);
+    if (dCambio !== null && dCambio >= 3) {
+      pendientes.push({ tipo:'tpn', desc:`TPN: cambio de apósito vencido (${dCambio} días desde último cambio)` });
+    }
+  }
+  // Evolución del día sin escribir
+  if (!tieneEvolucionHoy(p)) {
+    pendientes.push({ tipo:'evolucion', desc:'Falta evolución del día de hoy' });
+  }
+  return pendientes;
+}
 
 /* ---------- Usuario actual del dispositivo ---------- */
 function getCurrentUser() {
@@ -1264,6 +1384,8 @@ const State = {
   currentTab: 'lista',
   search: '',
   filterType: 'todos',  // todos | listos | postop | infeccion | hoy | sinprog | misPacientes
+  sortBy: 'cama',       // cama | dih
+  sortDir: 'asc',       // asc | desc
   load() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -1293,6 +1415,7 @@ const State = {
     if (!cats.medicamentos) cats.medicamentos = [];
     if (!cats.esquemasEgreso) cats.esquemasEgreso = [];
     if (!cats.cirujanos) cats.cirujanos = [];
+    if (!cats.ubicaciones) cats.ubicaciones = [];
     // Sembrar con valores por defecto si nunca se sembraron en este servidor.
     // El flag _seeded evita re-sembrar si el usuario borró ítems intencionalmente.
     if (!data.config._seeded) {
@@ -1301,11 +1424,30 @@ const State = {
       if (cats.medicamentos.length === 0) cats.medicamentos = SEED_MEDICAMENTOS.map(m => ({...m}));
       if (cats.esquemasEgreso.length === 0) cats.esquemasEgreso = SEED_ESQUEMAS_EGRESO.map(e => ({...e}));
       if (cats.cirujanos.length === 0) cats.cirujanos = SEED_CIRUJANOS.slice();
+      if (cats.ubicaciones.length === 0) cats.ubicaciones = SEED_UBICACIONES.slice();
       data.config._seeded = true;
     }
+    // Para usuarios que ya estaban en el sistema sin ubicaciones, sembrarlas si vacío
+    if (cats.ubicaciones.length === 0) cats.ubicaciones = SEED_UBICACIONES.slice();
     if (!data.config.jefeServicio) data.config.jefeServicio = 'Dr. Franklin Carrillo';
 
     data.patients.forEach(p => {
+      // Defaults para nuevos campos (v3.8) — pacientes anteriores no los tenían
+      if (p.ubicacion === undefined) p.ubicacion = '';
+      if (p.hospitalizacionesPrevias === undefined) p.hospitalizacionesPrevias = '';
+      if (p.traumatismosPrevios === undefined) p.traumatismosPrevios = '';
+      if (p.usaAditamentos === undefined) p.usaAditamentos = '';
+      if (!p.sustancias) {
+        p.sustancias = {
+          alcoholismo: { activo:false, detalle:'' },
+          tabaquismo: { activo:false, detalle:'' },
+          drogas: { activo:false, detalle:'' }
+        };
+      }
+      if (!p.curaciones) p.curaciones = { requiere:false, frecuencia:'', ultimaFecha:'', notas:'' };
+      if (!p.tpn) p.tpn = { activa:false, fechaInicio:'', ultimoCambio:'', ubicacion:'', presion:'', notas:'' };
+      if (!p.evoluciones) p.evoluciones = [];
+
       // Migrar cirugía única legacy → array cirugiasRealizadas
       if (!p.cirugiasRealizadas) p.cirugiasRealizadas = [];
       if (p.cirugia && p.cirugia.realizada && p.cirugia.fecha && p.cirugiasRealizadas.length === 0) {
@@ -1357,8 +1499,11 @@ const State = {
 };
 
 /* ---------- Lógica clínica ---------- */
+// Reemplaza la lógica anterior que sólo verificaba si el campo estaba vacío.
+// Ahora también detecta "niega", "no", "ninguno", "sin app", etc. como SANO.
 function tieneAntecedentes(p) {
-  return !!(p.antecedentesPatologicos && p.antecedentesPatologicos.trim().length > 0);
+  if (!p.antecedentesPatologicos || !p.antecedentesPatologicos.trim()) return false;
+  return !esSano(p);
 }
 
 function estudiosBasicos(p) {
@@ -1404,7 +1549,10 @@ function evaluarAptoCirugia(p) {
     return { listo:false, motivo:'Contraindicación: ' + motivos.join(', '), faltantes:[] };
   }
 
-  const requiereCompletos = (edad >= 50) || tieneAntecedentes(p);
+  // Regla: paciente sano (sin APP / "niega") con < 60 años → solo básicos.
+  // Paciente sano con ≥ 60 años → básicos + EKG + eval preop.
+  // Paciente con antecedentes → siempre básicos + EKG + eval preop.
+  const requiereCompletos = (edad >= 60) || tieneAntecedentes(p);
 
   if (!p.estudios.rxTorax.realizado) faltantes.push('Rx tórax');
   if (!p.estudios.hemograma.realizado) faltantes.push('Hemograma');
@@ -2355,6 +2503,18 @@ service cloud.firestore {
         icBadge.style.display = 'none';
       }
     }
+    // Badge de Resumen: cantidad de pacientes con pendientes
+    const conPend = State.data.patients.filter(p => !p.fechaEgreso)
+      .filter(p => calcularPendientesPaciente(p).length > 0).length;
+    const resBadge = document.getElementById('resumenCount');
+    if (resBadge) {
+      if (conPend > 0) {
+        resBadge.style.display = 'inline-block';
+        resBadge.textContent = conPend;
+      } else {
+        resBadge.style.display = 'none';
+      }
+    }
   },
 
   switchTab(tab) {
@@ -2369,6 +2529,7 @@ service cloud.firestore {
     const view = document.getElementById('view');
     const t = State.currentTab;
     if (t === 'lista') view.innerHTML = this.renderLista(false);
+    else if (t === 'resumen') view.innerHTML = this.renderResumen();
     else if (t === 'cirugia') view.innerHTML = this.renderCirugia();
     else if (t === 'programa') view.innerHTML = this.renderPrograma();
     else if (t === 'icrecibidas') view.innerHTML = this.renderICRecibidas();
@@ -2419,6 +2580,12 @@ service cloud.firestore {
       <div class="toolbar no-print">
         <input type="search" id="searchInput" placeholder="Buscar por nombre, cédula, cama, dx, cirujano..." value="${escapeHtml(State.search)}"
                oninput="App.setSearch(this.value)">
+        <button class="btn ghost small" onclick="App.toggleSort('cama')" title="Ordenar por número de cama">
+          Cama ${State.sortBy==='cama'?(State.sortDir==='asc'?'↑':'↓'):''}
+        </button>
+        <button class="btn ghost small" onclick="App.toggleSort('dih')" title="Ordenar por días intra-hospitalarios">
+          DIH ${State.sortBy==='dih'?(State.sortDir==='asc'?'↑':'↓'):''}
+        </button>
         <button class="btn ghost small" onclick="window.print()">🖨 Imprimir</button>
       </div>
 
@@ -2504,13 +2671,7 @@ service cloud.firestore {
       .filter(p => incluirEgresados || !p.fechaEgreso)
       .filter(p => this.matchesFilter(p))
       .filter(p => this.matchesSearch(p))
-      .sort((a,b) => {
-        const ca = (a.cama||'').toString();
-        const cb = (b.cama||'').toString();
-        const na = parseInt(ca,10), nb = parseInt(cb,10);
-        if (!isNaN(na) && !isNaN(nb) && na !== nb) return na - nb;
-        return ca.localeCompare(cb, 'es');
-      });
+      .sort((a,b) => this._compararPacientes(a,b));
 
     if (pacientes.length === 0) {
       const sinFiltro = !State.search;
@@ -2617,6 +2778,36 @@ service cloud.firestore {
         </div>
       </div>
     `;
+  },
+
+  // Comparación de pacientes según el orden actual del usuario
+  _compararPacientes(a, b) {
+    const dir = State.sortDir === 'desc' ? -1 : 1;
+    if (State.sortBy === 'dih') {
+      // DIH = días intra-hospitalarios desde fechaIngreso
+      const da = a.fechaIngreso ? daysBetween(a.fechaIngreso, a.fechaEgreso) : -1;
+      const db = b.fechaIngreso ? daysBetween(b.fechaIngreso, b.fechaEgreso) : -1;
+      if (da !== db) return (da - db) * dir;
+      // empate: ordenar por cama secundario
+      const ca = (a.cama||'').toString(), cb = (b.cama||'').toString();
+      return ca.localeCompare(cb, 'es', {numeric:true});
+    }
+    // Ordenar por cama (numérico-alfabético)
+    const ca = (a.cama||'').toString();
+    const cb = (b.cama||'').toString();
+    return ca.localeCompare(cb, 'es', {numeric:true, sensitivity:'base'}) * dir;
+  },
+
+  toggleSort(campo) {
+    if (State.sortBy === campo) {
+      // Alternar dirección. Para DIH solo permitimos ascendente (según especificación).
+      if (campo === 'dih') return;
+      State.sortDir = State.sortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      State.sortBy = campo;
+      State.sortDir = 'asc';
+    }
+    this.render();
   },
 
   setSearch(v) {
@@ -3413,6 +3604,94 @@ service cloud.firestore {
   },
 
   /* ============================================================
+     RESUMEN — pendientes por paciente, vista de pase de guardia
+     ============================================================ */
+  renderResumen() {
+    const cfg = getConfig();
+    const hospName = cfg.hospitalNombre ? `${escapeHtml(cfg.hospitalNombre)} — ` : '';
+    const activos = State.data.patients
+      .filter(p => !p.fechaEgreso)
+      .sort((a,b) => this._compararPacientes(a,b));
+
+    const conPendientes = activos.map(p => ({ p, pendientes: calcularPendientesPaciente(p) }));
+    const totalPendientes = conPendientes.reduce((s,x) => s + x.pendientes.length, 0);
+    const sinPendientes = conPendientes.filter(x => x.pendientes.length === 0).length;
+    const conAlMenosUno = conPendientes.filter(x => x.pendientes.length > 0);
+
+    let html = `
+      <div class="print-only">
+        <div class="print-title">${hospName}Resumen / Pase de guardia</div>
+        <div class="print-sub">${new Date().toLocaleString('es')} · ${activos.length} pacientes activos · ${totalPendientes} pendientes</div>
+      </div>
+
+      <div class="toolbar no-print">
+        <h2 style="margin:0">Resumen del servicio</h2>
+        <div style="flex:1"></div>
+        <button class="btn ghost small" onclick="window.print()">🖨 Imprimir pase de guardia</button>
+      </div>
+
+      <div class="kpi-grid">
+        <div class="kpi"><div class="kpi-label">Pacientes activos</div><div class="kpi-value">${activos.length}</div></div>
+        <div class="kpi yellow"><div class="kpi-label">Total pendientes</div><div class="kpi-value">${totalPendientes}</div></div>
+        <div class="kpi green"><div class="kpi-label">Sin pendientes</div><div class="kpi-value">${sinPendientes}</div></div>
+        <div class="kpi red"><div class="kpi-label">Pacientes con tareas</div><div class="kpi-value">${conAlMenosUno.length}</div></div>
+      </div>
+    `;
+
+    if (conAlMenosUno.length === 0) {
+      html += `<div class="empty">
+        <div class="ico">✅</div>
+        <div>Todos los pacientes activos están al día.</div>
+      </div>`;
+      return html;
+    }
+
+    // Iconos por tipo de pendiente
+    const icono = { estudios:'🔬', ic:'📞', infeccion:'⚠', curacion:'🩹', tpn:'💉', evolucion:'📝' };
+
+    html += conAlMenosUno.map(({p, pendientes}) => {
+      const dias = daysBetween(p.fechaIngreso);
+      const ubic = p.ubicacion ? p.ubicacion + ' · ' : '';
+      return `
+        <div class="patient-card warn" onclick="App.openPaciente('${p.id}')" style="margin-bottom:10px">
+          <div class="pc-row">
+            <div class="pc-bed">${escapeHtml(p.cama||'?')}</div>
+            <div class="pc-info">
+              <div class="pc-name">${escapeHtml(p.nombre || '(sin nombre)')}
+                <span class="tag yellow">${pendientes.length} pendiente${pendientes.length!==1?'s':''}</span>
+              </div>
+              <div class="pc-meta">${ubic}${escapeHtml(p.cedula||'—')} · ${escapeHtml(p.edad||'?')} años · DIH: ${dias} ${p.cirujano?'· Cir: '+escapeHtml(p.cirujano):''}</div>
+              <div class="pc-meta" style="margin-top:4px"><strong>Dx:</strong> ${escapeHtml((p.diagnosticos||[]).join(', ')||'—')}</div>
+              <ul style="margin:8px 0 0 0;padding-left:0;list-style:none">
+                ${pendientes.map(pe => `<li style="padding:3px 0;font-size:.88rem"><span style="margin-right:6px">${icono[pe.tipo]||'•'}</span>${escapeHtml(pe.desc)}</li>`).join('')}
+              </ul>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    // Tabla compacta para impresión
+    html += `<div class="print-only" style="margin-top:14px">
+      <table>
+        <thead><tr><th>Cama</th><th>Paciente</th><th>DIH</th><th>Pendientes</th></tr></thead>
+        <tbody>
+          ${conAlMenosUno.map(({p, pendientes}) => `
+            <tr>
+              <td><strong>${escapeHtml(p.cama||'—')}</strong></td>
+              <td>${escapeHtml(p.nombre||'')}</td>
+              <td>${daysBetween(p.fechaIngreso)}</td>
+              <td>${pendientes.map(pe => escapeHtml(pe.desc)).join('; ')}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>`;
+
+    return html;
+  },
+
+  /* ============================================================
      INTERCONSULTAS RECIBIDAS — solicitudes de otros servicios a ortopedia
      ============================================================ */
   _currentICEntranteId: null,
@@ -3826,7 +4105,19 @@ service cloud.firestore {
     if (!ic) return;
     ic[campo] = valor;
     ic.modificado = new Date().toISOString();
+    // Regla: si el servicio solicitante es UCI / Cuidados Intensivos,
+    // la urgencia se setea automáticamente a "urgente"
+    let necesitaRender = false;
+    if (campo === 'servicioSolicitante' && /uci|cuidados\s*intensivos/i.test(valor || '')) {
+      if (ic.urgencia !== 'urgente') {
+        ic.urgencia = 'urgente';
+        necesitaRender = true;
+      }
+    }
     State.save();
+    if (necesitaRender && this._currentICEntranteId === id) {
+      this.render();
+    }
   },
   setICEntrantePaciente(id, campo, valor) {
     const ic = (State.data.interconsultasEntrantes||[]).find(x => x.id === id);
@@ -4849,6 +5140,7 @@ service cloud.firestore {
       ['datos','Datos básicos'],
       ['preop','Preoperatorio'],
       ['programa','Programa Qx'],
+      ['evolucion','Evolución'],
       ['meds','Medicamentos'],
       ['labs','Laboratorios'],
       ['ic','Interconsultas'],
@@ -4860,6 +5152,7 @@ service cloud.firestore {
     if (this._modalSubtab === 'datos') bodyHtml = this.tabDatos(p);
     else if (this._modalSubtab === 'preop') bodyHtml = this.tabPreop(p);
     else if (this._modalSubtab === 'programa') bodyHtml = this.tabPrograma(p);
+    else if (this._modalSubtab === 'evolucion') bodyHtml = this.tabEvolucion(p);
     else if (this._modalSubtab === 'meds') bodyHtml = this.tabMeds(p);
     else if (this._modalSubtab === 'labs') bodyHtml = this.tabLabs(p);
     else if (this._modalSubtab === 'ic') bodyHtml = this.tabIC(p);
@@ -4952,15 +5245,28 @@ service cloud.firestore {
         </div>
         <div class="field-row">
           <div class="field">
+            <label>Ubicación</label>
+            <select onchange="App.actualizar('${p.id}','ubicacion',this.value)">
+              <option value="">— seleccionar —</option>
+              ${getCatalogo('ubicaciones').map(u => `<option value="${escapeHtml(u)}" ${p.ubicacion===u?'selected':''}>${escapeHtml(u)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field">
             <label>N° de cama</label>
             <input value="${escapeHtml(p.cama)}" oninput="App.actualizar('${p.id}','cama',this.value)">
           </div>
+        </div>
+        <div class="field-row">
           <div class="field">
             <label>Cirujano a cargo</label>
             <input list="cirujanosList" value="${escapeHtml(p.cirujano)}" oninput="App.actualizar('${p.id}','cirujano',this.value)" placeholder="Empieza a escribir...">
             <datalist id="cirujanosList">
               ${getCatalogo('cirujanos').map(c => `<option value="${escapeHtml(c)}">`).join('')}
             </datalist>
+          </div>
+          <div class="field">
+            <label>Uso de aditamentos para deambulación</label>
+            <input value="${escapeHtml(p.usaAditamentos||'')}" oninput="App.actualizar('${p.id}','usaAditamentos',this.value)" placeholder="Ej. muletas, andadera, silla de ruedas, ninguno">
           </div>
         </div>
         <div class="field-row">
@@ -5003,29 +5309,189 @@ service cloud.firestore {
         </div>
         <div class="field">
           <label>Antecedentes personales patológicos</label>
-          <textarea rows="3" placeholder="HTA, DM2, EPOC, ERC, etc." oninput="App.actualizar('${p.id}','antecedentesPatologicos',this.value)">${escapeHtml(p.antecedentesPatologicos)}</textarea>
+          <textarea rows="3" placeholder="HTA, DM2, EPOC, ERC, etc. (escribe 'niega' si el paciente no tiene)"
+            oninput="App.actualizar('${p.id}','antecedentesPatologicos',this.value)">${escapeHtml(p.antecedentesPatologicos)}</textarea>
+          ${esSano(p)
+            ? '<div class="muted" style="font-size:.8rem;margin-top:4px;color:#059669">✓ Sin antecedentes patológicos detectado (paciente sano)</div>'
+            : '<div class="muted" style="font-size:.8rem;margin-top:4px;color:#92400e">Con antecedentes patológicos</div>'}
         </div>
         <div class="field">
-          <label>Antecedentes quirúrgicos</label>
-          <textarea rows="2" oninput="App.actualizar('${p.id}','antecedentesQuirurgicos',this.value)">${escapeHtml(p.antecedentesQuirurgicos)}</textarea>
+          <label>Cirugías / antecedentes quirúrgicos previos</label>
+          <textarea rows="2" placeholder="Ej. apendicectomía 2010, RTC izquierda 2018"
+            oninput="App.actualizar('${p.id}','antecedentesQuirurgicos',this.value)">${escapeHtml(p.antecedentesQuirurgicos)}</textarea>
+        </div>
+        <div class="field">
+          <label>Hospitalizaciones previas</label>
+          <textarea rows="2" placeholder="Motivo y fecha de hospitalizaciones anteriores"
+            oninput="App.actualizar('${p.id}','hospitalizacionesPrevias',this.value)">${escapeHtml(p.hospitalizacionesPrevias||'')}</textarea>
+        </div>
+        <div class="field">
+          <label>Traumatismos / fracturas previas</label>
+          <textarea rows="2" placeholder="Ej. fx radio distal D 2015, fx tobillo I 2020"
+            oninput="App.actualizar('${p.id}','traumatismosPrevios',this.value)">${escapeHtml(p.traumatismosPrevios||'')}</textarea>
         </div>
         <div class="field">
           <label>Medicamentos previos al ingreso</label>
           <textarea rows="2" oninput="App.actualizar('${p.id}','medicamentosPrevios',this.value)">${escapeHtml(p.medicamentosPrevios)}</textarea>
         </div>
-        <div class="field">
+        <div class="field" style="margin-bottom:0">
           <label>Otras observaciones relevantes</label>
           <textarea rows="2" oninput="App.actualizar('${p.id}','observaciones',this.value)">${escapeHtml(p.observaciones)}</textarea>
         </div>
       </div>
+
+      <div class="card">
+        <h3>Uso de sustancias</h3>
+        ${['alcoholismo','tabaquismo','drogas'].map(k => {
+          const s = (p.sustancias && p.sustancias[k]) || { activo:false, detalle:'' };
+          const labels = { alcoholismo:'Alcoholismo', tabaquismo:'Tabaquismo', drogas:'Uso de drogas' };
+          return `
+            <div class="card compact" style="margin-bottom:8px;border-left:4px solid ${s.activo?'#dc2626':'#cbd5e1'}">
+              <div class="checkbox-row">
+                <input type="checkbox" id="sus-${k}-${p.id}" ${s.activo?'checked':''}
+                  onchange="App.setSustancia('${p.id}','${k}','activo',this.checked)">
+                <label for="sus-${k}-${p.id}"><strong>${labels[k]}</strong></label>
+              </div>
+              ${s.activo ? `
+                <div class="field" style="margin-top:6px;margin-bottom:0">
+                  <label>Detalle (frecuencia, cantidad, tiempo)</label>
+                  <input value="${escapeHtml(s.detalle||'')}"
+                    placeholder="${k==='alcoholismo'?'Ej. 2 cervezas/día por 10 años':k==='tabaquismo'?'Ej. 1 cajetilla/día por 20 años':'Ej. cocaína ocasional'}"
+                    oninput="App.setSustancia('${p.id}','${k}','detalle',this.value)">
+                </div>
+              ` : ''}
+            </div>
+          `;
+        }).join('')}
+      </div>
+
+      <div class="card">
+        <h3>Cuidados activos</h3>
+
+        <!-- Curaciones -->
+        <div class="card compact" style="margin-bottom:10px;border-left:4px solid ${p.curaciones?.requiere?'#3282b8':'#cbd5e1'}">
+          <div class="checkbox-row">
+            <input type="checkbox" id="cur-${p.id}" ${p.curaciones?.requiere?'checked':''}
+              onchange="App.setCuracion('${p.id}','requiere',this.checked)">
+            <label for="cur-${p.id}"><strong>Requiere curaciones</strong></label>
+          </div>
+          ${p.curaciones?.requiere ? `
+            <div class="field-row" style="margin-top:8px">
+              <div class="field" style="margin-bottom:0">
+                <label>Frecuencia *</label>
+                <select onchange="App.setCuracion('${p.id}','frecuencia',this.value)">
+                  <option value="">— elegir —</option>
+                  <option value="24h" ${p.curaciones.frecuencia==='24h'?'selected':''}>Cada 24 horas</option>
+                  <option value="48h" ${p.curaciones.frecuencia==='48h'?'selected':''}>Cada 48 horas</option>
+                  <option value="72h" ${p.curaciones.frecuencia==='72h'?'selected':''}>Cada 72 horas</option>
+                </select>
+              </div>
+              <div class="field" style="margin-bottom:0">
+                <label>Última curación</label>
+                <input type="date" value="${escapeHtml(p.curaciones.ultimaFecha||'')}"
+                  onchange="App.setCuracion('${p.id}','ultimaFecha',this.value)">
+              </div>
+            </div>
+            <div class="field" style="margin-top:8px;margin-bottom:0">
+              <label>Notas (tipo de cura, materiales, etc.)</label>
+              <input value="${escapeHtml(p.curaciones.notas||'')}"
+                oninput="App.setCuracion('${p.id}','notas',this.value)">
+            </div>
+          ` : ''}
+        </div>
+
+        <!-- TPN (Terapia de Presión Negativa / VAC) -->
+        <div class="card compact" style="margin-bottom:0;border-left:4px solid ${p.tpn?.activa?'#7c3aed':'#cbd5e1'}">
+          <div class="checkbox-row">
+            <input type="checkbox" id="tpn-${p.id}" ${p.tpn?.activa?'checked':''}
+              onchange="App.setTPN('${p.id}','activa',this.checked)">
+            <label for="tpn-${p.id}"><strong>Terapia de Presión Negativa (TPN / VAC)</strong></label>
+          </div>
+          ${p.tpn?.activa ? (() => {
+            const dT = diasTPN(p);
+            const dC = diasDesdeUltimoCambioTPN(p);
+            const alertaCambio = dC !== null && dC >= 3;
+            return `
+              <div style="margin-top:8px">
+                ${dT !== null ? `<span class="tag blue">Día ${dT} con TPN</span>` : ''}
+                ${dC !== null ? `<span class="tag ${alertaCambio?'red':'green'}" style="margin-left:6px">${dC} día(s) desde último cambio${alertaCambio?' ⚠':''}</span>` : ''}
+              </div>
+              <div class="field-row" style="margin-top:8px">
+                <div class="field" style="margin-bottom:0">
+                  <label>Fecha de inicio</label>
+                  <input type="date" value="${escapeHtml(p.tpn.fechaInicio||'')}"
+                    onchange="App.setTPN('${p.id}','fechaInicio',this.value)">
+                </div>
+                <div class="field" style="margin-bottom:0">
+                  <label>Último cambio de apósito</label>
+                  <input type="date" value="${escapeHtml(p.tpn.ultimoCambio||'')}"
+                    onchange="App.setTPN('${p.id}','ultimoCambio',this.value)">
+                </div>
+              </div>
+              <div class="field-row" style="margin-top:8px">
+                <div class="field" style="margin-bottom:0">
+                  <label>Ubicación</label>
+                  <input value="${escapeHtml(p.tpn.ubicacion||'')}"
+                    placeholder="Ej. tibia derecha, muñón, etc."
+                    oninput="App.setTPN('${p.id}','ubicacion',this.value)">
+                </div>
+                <div class="field" style="margin-bottom:0">
+                  <label>Presión (mmHg)</label>
+                  <input value="${escapeHtml(p.tpn.presion||'')}"
+                    placeholder="Ej. 125"
+                    oninput="App.setTPN('${p.id}','presion',this.value)">
+                </div>
+              </div>
+              <div class="field" style="margin-top:8px;margin-bottom:0">
+                <label>Notas</label>
+                <input value="${escapeHtml(p.tpn.notas||'')}"
+                  oninput="App.setTPN('${p.id}','notas',this.value)">
+              </div>
+            `;
+          })() : ''}
+        </div>
+      </div>
     `;
+  },
+
+  /* Acciones nuevas: sustancias, curaciones, TPN */
+  setSustancia(id, tipo, campo, valor) {
+    const p = this._findP(id); if (!p) return;
+    if (!p.sustancias) p.sustancias = { alcoholismo:{activo:false,detalle:''}, tabaquismo:{activo:false,detalle:''}, drogas:{activo:false,detalle:''} };
+    if (!p.sustancias[tipo]) p.sustancias[tipo] = { activo:false, detalle:'' };
+    p.sustancias[tipo][campo] = valor;
+    State.save();
+    if (campo === 'activo') this.renderModal(id);
+  },
+  setCuracion(id, campo, valor) {
+    const p = this._findP(id); if (!p) return;
+    if (!p.curaciones) p.curaciones = { requiere:false, frecuencia:'', ultimaFecha:'', notas:'' };
+    p.curaciones[campo] = valor;
+    State.save();
+    if (campo === 'requiere') this.renderModal(id);
+  },
+  setTPN(id, campo, valor) {
+    const p = this._findP(id); if (!p) return;
+    if (!p.tpn) p.tpn = { activa:false, fechaInicio:'', ultimoCambio:'', ubicacion:'', presion:'', notas:'' };
+    if (campo === 'activa' && valor && !p.tpn.fechaInicio) {
+      p.tpn.fechaInicio = todayISO();
+      p.tpn.ultimoCambio = todayISO();
+      logCambio(p, 'TPN', 'Iniciada terapia de presión negativa');
+    }
+    if (campo === 'activa' && !valor) {
+      logCambio(p, 'TPN', 'Suspendida terapia de presión negativa');
+    }
+    p.tpn[campo] = valor;
+    State.save();
+    if (campo === 'activa') this.renderModal(id);
   },
 
   /* -------- Preoperatorio -------- */
   tabPreop(p) {
     const apto = evaluarAptoCirugia(p);
     const edad = parseInt(p.edad,10);
-    const requiereCompletos = (edad>=50) || tieneAntecedentes(p);
+    const requiereCompletos = (edad>=60) || tieneAntecedentes(p);
+    const sano = !tieneAntecedentes(p);
 
     const ult = ultimaCirugia(p);
     const totalCir = (p.cirugiasRealizadas || []).length;
@@ -5061,8 +5527,10 @@ service cloud.firestore {
     }
 
     const reglaTxt = requiereCompletos
-      ? `Por edad o antecedentes, este paciente requiere <strong>preoperatorio completo</strong> (laboratorios completos, EKG, Rx tórax y evaluación preoperatoria por M.I., M.F., Geriatría o subespecialidad).`
-      : `Paciente sin antecedentes y menor de 50 años: requiere <strong>estudios básicos</strong> (Rx tórax, hemograma, tiempos de coagulación, química sanguínea básica).`;
+      ? (sano && edad >= 60
+          ? `Paciente sano pero <strong>≥60 años</strong>: requiere preoperatorio completo (Rx tórax, hemograma, tiempos de coagulación, química, EKG y evaluación preoperatoria por M.I., M.F., Geriatría o subespecialidad).`
+          : `Por antecedentes patológicos, este paciente requiere <strong>preoperatorio completo</strong> (laboratorios, EKG, Rx tórax y evaluación preoperatoria por M.I., M.F., Geriatría o subespecialidad).`)
+      : `Paciente sano (sin APP) y <strong>menor de 60 años</strong>: requiere <strong>estudios básicos</strong> (Rx tórax, hemograma, tiempos de coagulación, química sanguínea básica). NO requiere evaluación preoperatoria por especialidad.`;
 
     const estudio = (key, label, mostrar=true) => {
       if (!mostrar) return '';
@@ -5339,6 +5807,77 @@ service cloud.firestore {
     });
     sincronizarCirugiaLegacy(p);
     logCambio(p, 'Cirugía', 'Agregada manualmente al historial');
+    State.save();
+    this.renderModal(id);
+  },
+
+  /* -------- Evolución diaria -------- */
+  tabEvolucion(p) {
+    if (!p.evoluciones) p.evoluciones = [];
+    const evs = p.evoluciones.slice().sort((a,b) => (b.fecha||'').localeCompare(a.fecha||''));
+    const tieneHoy = tieneEvolucionHoy(p);
+    const ultEv = ultimaEvolucion(p);
+    return `
+      ${tieneHoy
+        ? `<div class="alert-box green"><strong>✓ Evolución del día ya escrita.</strong> Última: ${fmtDate(ultEv.fecha.slice(0,10))} por ${escapeHtml(ultEv.autor||'(sin autor)')}.</div>`
+        : `<div class="alert-box yellow"><strong>⚠ Falta evolución de hoy.</strong> Agrega una nueva entrada para el día actual.</div>`}
+
+      <div class="card">
+        <div class="row-between">
+          <h3 style="margin:0">Evolución diaria</h3>
+          <button class="btn small" onclick="App.addEvolucion('${p.id}')">+ Nueva evolución del día</button>
+        </div>
+        <p class="muted" style="font-size:.85rem;margin-top:6px">
+          Registra una nota por día con tus hallazgos, plan y conducta. Las notas son cronológicas y quedan firmadas con tu nombre.
+        </p>
+        ${evs.length === 0 ? `
+          <div class="empty" style="padding:20px"><div class="ico">📝</div><div>Sin evoluciones registradas.</div></div>
+        ` : evs.map(ev => `
+          <div class="card compact" style="margin-top:10px">
+            <div class="row-between">
+              <strong>${ev.fecha ? new Date(ev.fecha).toLocaleString('es', {weekday:'long',day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—'}</strong>
+              <span class="muted" style="font-size:.8rem">${escapeHtml(ev.autor || '(sin autor)')}</span>
+            </div>
+            <div class="field" style="margin-top:8px;margin-bottom:0">
+              <textarea rows="6" placeholder="Subjetivo, hallazgos al examen físico, evolución, plan..."
+                oninput="App.setEvolucion('${p.id}','${ev.id}','texto',this.value)">${escapeHtml(ev.texto||'')}</textarea>
+            </div>
+            <div style="text-align:right;margin-top:6px">
+              <button class="btn ghost small" onclick="App.eliminarEvolucion('${p.id}','${ev.id}')">Eliminar</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  },
+
+  addEvolucion(id) {
+    const p = this._findP(id); if (!p) return;
+    if (!p.evoluciones) p.evoluciones = [];
+    p.evoluciones.push({
+      id: 'ev_' + uid(),
+      fecha: new Date().toISOString(),
+      texto: '',
+      autor: getCurrentUser() || '(sin identificar)',
+      modificado: new Date().toISOString()
+    });
+    logCambio(p, 'Evolución', 'Nueva entrada');
+    State.save();
+    this.renderModal(id);
+  },
+  setEvolucion(id, evId, campo, valor) {
+    const p = this._findP(id); if (!p) return;
+    const ev = (p.evoluciones||[]).find(x => x.id === evId);
+    if (!ev) return;
+    ev[campo] = valor;
+    ev.modificado = new Date().toISOString();
+    State.save();
+  },
+  eliminarEvolucion(id, evId) {
+    if (!confirm('¿Eliminar esta evolución?')) return;
+    const p = this._findP(id); if (!p) return;
+    p.evoluciones = (p.evoluciones||[]).filter(x => x.id !== evId);
+    logCambio(p, 'Evolución', 'Entrada eliminada');
     State.save();
     this.renderModal(id);
   },
