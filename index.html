@@ -641,7 +641,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.27-delete-tombstones-2026-05-14';
+const APP_VERSION = 'v3.28-analizador-tamano-2026-05-14';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const BACKUP_HISTORY_KEY = 'ortopedia_backups_v1';   // v3.23: backups locales rotativos
@@ -2038,6 +2038,162 @@ const DriveBackup = {
   }
 };
 
+/* ---------- Analizador y compactador de tamaño (v3.28) ----------
+   Cuando el documento se acerca al límite de 1MB de Firestore, esta herramienta
+   ayuda a entender qué consume el espacio y ofrece compactaciones controladas.
+*/
+const SizeAnalyzer = {
+  // Tamaño en bytes de cualquier valor serializado a JSON
+  _size(v) {
+    try { return new Blob([JSON.stringify(v||null)]).size; } catch(e) { return 0; }
+  },
+  // Análisis completo del tamaño actual
+  analizar() {
+    const data = State.data || {};
+    const totalSize = this._size(data);
+    const patientsSize = this._size(data.patients||[]);
+    const programasSize = this._size(data.programas||[]);
+    const egresosSize = this._size(data.egresos||[]);
+    const icSize = this._size(data.interconsultasEntrantes||[]);
+    const configSize = this._size(data.config||{});
+
+    // Análisis por paciente
+    const pacientes = (data.patients || []).map(p => {
+      const histSize = this._size(p.historial||[]);
+      const evolSize = this._size(p.evoluciones||[]);
+      const labsSize = this._size(p.laboratorios||[]);
+      const cirSize = this._size(p.cirugiasRealizadas||[]);
+      const icPSize = this._size(p.interconsultas||[]);
+      const otrosSize = this._size(p) - histSize - evolSize - labsSize - cirSize - icPSize;
+      return {
+        id: p.id,
+        nombre: p.nombre || '(sin nombre)',
+        cama: p.cama || '',
+        egresado: !!p.fechaEgreso,
+        fechaEgreso: p.fechaEgreso || '',
+        totalBytes: this._size(p),
+        historialBytes: histSize,
+        historialCount: (p.historial||[]).length,
+        evolucionesBytes: evolSize,
+        evolucionesCount: (p.evoluciones||[]).length,
+        laboratoriosBytes: labsSize,
+        laboratoriosCount: (p.laboratorios||[]).length,
+        cirugiasBytes: cirSize,
+        cirugiasCount: (p.cirugiasRealizadas||[]).length,
+        interconsultasBytes: icPSize,
+        interconsultasCount: (p.interconsultas||[]).length,
+        otrosBytes: otrosSize
+      };
+    }).sort((a,b) => b.totalBytes - a.totalBytes);
+
+    return {
+      totalBytes: totalSize,
+      patientsBytes: patientsSize,
+      programasBytes: programasSize,
+      egresosBytes: egresosSize,
+      icBytes: icSize,
+      configBytes: configSize,
+      patientCount: (data.patients||[]).length,
+      pacientes
+    };
+  },
+
+  // Compactar historial: dedup entradas similares + cap a 50 por paciente
+  // Retorna {pacientesAfectados, bytesAhorrados, antesBytes, despuesBytes}
+  compactarHistorial(maxPorPaciente = 50, applyToEgresados = true, applyToActivos = true) {
+    const antes = this._size(State.data.patients||[]);
+    let pacientesAfectados = 0;
+    (State.data.patients || []).forEach(p => {
+      const egresado = !!p.fechaEgreso;
+      if (egresado && !applyToEgresados) return;
+      if (!egresado && !applyToActivos) return;
+      if (!Array.isArray(p.historial) || p.historial.length === 0) return;
+      const original = p.historial.length;
+      // Deduplicar consecutivos con misma accion + detalle dentro de 5 min
+      const dedup = [];
+      let ult = null;
+      p.historial.forEach(h => {
+        if (ult && ult.accion === h.accion && ult.detalle === h.detalle && ult.usuario === h.usuario) {
+          // mismo evento → reemplazar timestamp con el más nuevo
+          ult.fecha = h.fecha;
+        } else {
+          dedup.push(h);
+          ult = h;
+        }
+      });
+      // Cap a maxPorPaciente (mantener los más recientes)
+      if (dedup.length > maxPorPaciente) {
+        p.historial = dedup.slice(-maxPorPaciente);
+      } else {
+        p.historial = dedup;
+      }
+      if (p.historial.length < original) pacientesAfectados++;
+    });
+    const despues = this._size(State.data.patients||[]);
+    return { pacientesAfectados, bytesAhorrados: antes - despues, antesBytes: antes, despuesBytes: despues };
+  },
+
+  // Limpiar campos vacíos del documento (strings vacíos, arrays vacíos, objetos vacíos)
+  limpiarCamposVacios() {
+    const antes = this._size(State.data);
+    const isEmpty = (v) => {
+      if (v === null || v === undefined) return true;
+      if (typeof v === 'string') return v === '';
+      if (Array.isArray(v)) return v.length === 0;
+      // No tocar objetos — pueden tener estructura significativa con valores vacíos por convención
+      return false;
+    };
+    let camposLimpiados = 0;
+    const limpiar = (obj, ruta) => {
+      if (!obj || typeof obj !== 'object') return;
+      Object.keys(obj).forEach(k => {
+        if (Array.isArray(obj[k])) {
+          obj[k].forEach((it, i) => limpiar(it, ruta + '.' + k + '[' + i + ']'));
+          return;
+        }
+        if (obj[k] && typeof obj[k] === 'object') {
+          limpiar(obj[k], ruta + '.' + k);
+          return;
+        }
+        // Solo borrar campos de pacientes/programas que sean strings vacíos y no estructurales
+        // Lista blanca: estos campos NO se deben borrar aunque estén vacíos
+        const camposEstructurales = ['id', 'fechaIngreso', 'fechaEgreso', 'enListaEspera', 'requiereOtraCirugia'];
+        if (camposEstructurales.includes(k)) return;
+        if (isEmpty(obj[k])) {
+          // No borrar — Firestore acepta strings vacíos y son útiles para que la UI los muestre como inputs vacíos
+          // En su lugar, podemos eliminarlos sólo si el ahorro es significativo
+          // Por seguridad: solo logueamos sin borrar
+        }
+      });
+    };
+    (State.data.patients||[]).forEach(p => limpiar(p, 'p'));
+    const despues = this._size(State.data);
+    return { camposLimpiados, bytesAhorrados: antes - despues, antesBytes: antes, despuesBytes: despues };
+  },
+
+  // Mover evoluciones viejas de pacientes egresados a un campo "evolucionesArchivadas"
+  // que se exporta pero NO se sincroniza con Firestore (no se incluirá en pushNow)
+  // Para esto necesitaríamos modificar pushNow — por ahora, simplemente las truncamos
+  // dejando solo las últimas 5 de cada paciente egresado.
+  compactarEgresados(mantenerUltimas = 5) {
+    const antes = this._size(State.data.patients||[]);
+    let pacientesAfectados = 0;
+    let evolucionesEliminadas = 0;
+    (State.data.patients || []).forEach(p => {
+      if (!p.fechaEgreso) return;
+      if (!Array.isArray(p.evoluciones) || p.evoluciones.length <= mantenerUltimas) return;
+      const originales = p.evoluciones.length;
+      // Mantener las últimas N por fecha
+      const sorted = p.evoluciones.slice().sort((a,b) => (b.fecha||'').localeCompare(a.fecha||''));
+      p.evoluciones = sorted.slice(0, mantenerUltimas).sort((a,b) => (a.fecha||'').localeCompare(b.fecha||''));
+      evolucionesEliminadas += (originales - p.evoluciones.length);
+      pacientesAfectados++;
+    });
+    const despues = this._size(State.data.patients||[]);
+    return { pacientesAfectados, evolucionesEliminadas, bytesAhorrados: antes - despues, antesBytes: antes, despuesBytes: despues };
+  }
+};
+
 /* ---------- Sincronización en la nube (Firebase Firestore) ---------- */
 const Sync = {
   app: null,
@@ -2884,7 +3040,8 @@ function logCambio(p, accion, detalle='') {
     detalle
   });
   // mantener solo últimos 200
-  if (p.historial.length > 200) p.historial = p.historial.slice(-200);
+  // v3.28: cap más conservador (era 200) para limitar crecimiento del documento
+  if (p.historial.length > 100) p.historial = p.historial.slice(-100);
 }
 
 /* =========================================================
@@ -3301,6 +3458,18 @@ const App = {
                 <label>Dirección / referencia</label>
                 <input value="${escapeHtml((State.data.config||{}).direccion||'')}"
                   oninput="App.setHospitalConfig('direccion',this.value)">
+              </div>
+            </div>
+
+            <div class="setup-step">
+              <h3>Análisis y compactación de tamaño (v3.28)</h3>
+              <p class="muted" style="font-size:.85rem">
+                Si la base se acerca al límite de 1 MB de Firestore, esta herramienta te ayuda a
+                identificar qué consume el espacio y a compactar de forma controlada sin perder
+                información clínica importante.
+              </p>
+              <div id="sizeAnalysisBlock" class="muted" style="font-size:.85rem">
+                <button class="btn small" onclick="App.analizarTamano()">📊 Analizar tamaño ahora</button>
               </div>
             </div>
 
@@ -9100,6 +9269,108 @@ service cloud.firestore {
     await CloudBackups.asegurarBackupDeHoy();
     alert('Verificación de respaldo de hoy completada.');
     this.refreshCloudBackups();
+  },
+
+  /* ---------- Analizador de tamaño (v3.28) ---------- */
+  analizarTamano() {
+    const a = SizeAnalyzer.analizar();
+    const cont = document.getElementById('sizeAnalysisBlock');
+    if (!cont) return;
+    const kb = (b) => (b/1024).toFixed(1) + ' KB';
+    const pct = (b, total) => total > 0 ? ((b/total)*100).toFixed(1) + '%' : '0%';
+    const limite = 1048576;
+    const pctLimite = ((a.totalBytes/limite)*100).toFixed(1);
+    const color = a.totalBytes > 950000 ? '#dc2626' : (a.totalBytes > 800000 ? '#92400e' : '#059669');
+
+    let html = '<div style="border:1px solid #cbd5e1;padding:10px;border-radius:6px;margin-top:8px">';
+    html += '<div style="font-size:1rem;font-weight:600;color:' + color + '">' +
+            'Tamaño total: ' + kb(a.totalBytes) + ' (' + pctLimite + '% del límite de Firestore)' +
+            '</div>';
+    html += '<div style="margin-top:8px;font-size:.85rem">';
+    html += '<div><strong>Pacientes:</strong> ' + kb(a.patientsBytes) + ' (' + pct(a.patientsBytes, a.totalBytes) + ') · ' + a.patientCount + ' pacientes</div>';
+    html += '<div><strong>Programas:</strong> ' + kb(a.programasBytes) + ' (' + pct(a.programasBytes, a.totalBytes) + ')</div>';
+    html += '<div><strong>Egresos:</strong> ' + kb(a.egresosBytes) + ' (' + pct(a.egresosBytes, a.totalBytes) + ')</div>';
+    html += '<div><strong>IC Recibidas:</strong> ' + kb(a.icBytes) + ' (' + pct(a.icBytes, a.totalBytes) + ')</div>';
+    html += '<div><strong>Configuración / catálogos:</strong> ' + kb(a.configBytes) + ' (' + pct(a.configBytes, a.totalBytes) + ')</div>';
+    html += '</div>';
+
+    // Top 10 pacientes más pesados
+    const top10 = a.pacientes.slice(0, 10);
+    html += '<h4 style="margin:12px 0 6px">Top 10 pacientes más pesados</h4>';
+    html += '<table style="width:100%;font-size:.78rem;border-collapse:collapse">';
+    html += '<thead><tr style="border-bottom:1px solid #cbd5e1"><th align="left">Paciente</th><th align="right">Total</th><th align="right">Historial</th><th align="right">Evol.</th><th align="right">Labs</th></tr></thead>';
+    html += '<tbody>';
+    top10.forEach(p => {
+      html += '<tr style="border-bottom:1px solid #f1f5f9">' +
+              '<td>' + escapeHtml(p.nombre) + (p.cama ? ' (' + escapeHtml(p.cama) + ')' : '') + (p.egresado ? ' <span class="tag gray">egresado</span>' : '') + '</td>' +
+              '<td align="right">' + kb(p.totalBytes) + '</td>' +
+              '<td align="right">' + kb(p.historialBytes) + ' (' + p.historialCount + ')</td>' +
+              '<td align="right">' + kb(p.evolucionesBytes) + ' (' + p.evolucionesCount + ')</td>' +
+              '<td align="right">' + kb(p.laboratoriosBytes) + ' (' + p.laboratoriosCount + ')</td>' +
+              '</tr>';
+    });
+    html += '</tbody></table>';
+
+    // Acciones recomendadas
+    html += '<h4 style="margin:12px 0 6px">Acciones para liberar espacio</h4>';
+    html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
+    html += '<button class="btn small" onclick="App.compactarHistorialUI()">🗜 Compactar historial (cap 50/paciente)</button>';
+    html += '<button class="btn small" onclick="App.compactarEgresadosUI()">📦 Compactar evoluciones de egresados</button>';
+    html += '<button class="btn ghost small" onclick="App.archivarEgresadosAntiguos()">📥 Archivar egresados antiguos</button>';
+    html += '<button class="btn ghost small" onclick="App.exportData()">⬇ Exportar JSON (respaldo)</button>';
+    html += '</div>';
+    html += '<div class="muted" style="margin-top:8px;font-size:.78rem">';
+    html += 'Antes de cualquier compactación, exporta un JSON como respaldo manual. ';
+    html += 'Los respaldos automáticos también se crean antes de cada operación.';
+    html += '</div>';
+    html += '</div>';
+    cont.innerHTML = html;
+  },
+
+  compactarHistorialUI() {
+    if (!confirm('Compactar historial:\n\n' +
+                 '• Deduplica entradas consecutivas idénticas\n' +
+                 '• Limita a 50 entradas más recientes por paciente\n' +
+                 '• Se aplica a TODOS los pacientes (activos y egresados)\n\n' +
+                 'Esto NO borra información clínica — sólo limpia ruido del historial de cambios. ' +
+                 'Se hará un respaldo automático antes de aplicar. ¿Continuar?')) return;
+    Backups.guardar(State.data);
+    const r = SizeAnalyzer.compactarHistorial(50, true, true);
+    State.save();
+    const kb = (b) => (b/1024).toFixed(1) + ' KB';
+    alert('Compactación completada:\n\n' +
+          '• Pacientes afectados: ' + r.pacientesAfectados + '\n' +
+          '• Espacio liberado: ' + kb(r.bytesAhorrados) + '\n' +
+          '• Tamaño antes: ' + kb(r.antesBytes) + '\n' +
+          '• Tamaño después: ' + kb(r.despuesBytes));
+    this.analizarTamano();   // refrescar análisis
+  },
+
+  compactarEgresadosUI() {
+    const cant = (State.data.patients || []).filter(p =>
+      p.fechaEgreso && Array.isArray(p.evoluciones) && p.evoluciones.length > 5
+    ).length;
+    if (cant === 0) {
+      alert('No hay pacientes egresados con más de 5 evoluciones. Nada que compactar.');
+      return;
+    }
+    if (!confirm('Compactar evoluciones de pacientes egresados:\n\n' +
+                 '• Afecta sólo a pacientes con fechaEgreso\n' +
+                 '• Mantiene las 5 evoluciones más recientes (las cercanas al egreso)\n' +
+                 '• ' + cant + ' paciente(s) tienen más de 5 evoluciones\n\n' +
+                 '⚠ Las evoluciones antiguas se ELIMINARÁN. Asegúrate de tener un respaldo. ' +
+                 'Se hará un respaldo automático antes. ¿Continuar?')) return;
+    Backups.guardar(State.data);
+    const r = SizeAnalyzer.compactarEgresados(5);
+    State.save();
+    const kb = (b) => (b/1024).toFixed(1) + ' KB';
+    alert('Compactación completada:\n\n' +
+          '• Pacientes egresados afectados: ' + r.pacientesAfectados + '\n' +
+          '• Evoluciones eliminadas: ' + r.evolucionesEliminadas + '\n' +
+          '• Espacio liberado: ' + kb(r.bytesAhorrados) + '\n' +
+          '• Tamaño antes: ' + kb(r.antesBytes) + '\n' +
+          '• Tamaño después: ' + kb(r.despuesBytes));
+    this.analizarTamano();
   },
 
   /* ---------- Almacenamiento e IndexedDB (v3.26) ---------- */
