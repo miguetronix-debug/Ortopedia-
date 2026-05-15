@@ -639,7 +639,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.21-merge-config-sync-2026-05-14';
+const APP_VERSION = 'v3.22-auto-recuperar-usuarios-2026-05-14';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -1689,6 +1689,8 @@ const Sync = {
             };
             const localStr = JSON.stringify(State.data);
             const newStr = JSON.stringify(newState);
+            // Cantidad de usuarios antes de la migración (para detectar auto-recuperación)
+            const usuariosAntes = (mergedConfig.usuarios||[]).length;
             if (localStr !== newStr) {
               State.data = newState;
               State._migrar();
@@ -1699,10 +1701,14 @@ const Sync = {
               } else if (App._currentModalId) {
                 App.closeModal();
               }
+            } else {
+              // Aún sin cambio aparente, _migrar pudo haber recuperado usuarios desde firmas
+              State._migrar();
             }
-            // Si la fusión recuperó usuarios/catálogos locales, re-publicar para que
-            // los demás dispositivos también los reciban.
-            if (needsRepush) {
+            const usuariosDespues = (State.data.config.usuarios||[]).length;
+            // Si la fusión recuperó usuarios/catálogos locales, O si _migrar
+            // auto-recuperó usuarios desde firmas, re-publicar.
+            if (needsRepush || usuariosDespues > usuariosAntes) {
               this.scheduleSave();
             }
           } else if (snap && !snap.exists) {
@@ -1836,6 +1842,41 @@ const State = {
     if (cats.plantillasEvolucion.length === 0) cats.plantillasEvolucion = SEED_PLANTILLAS_EVOLUCION.slice();
     if (!data.config.jefeServicio) data.config.jefeServicio = 'Dr. Franklin Carrillo';
     if (data.config.archivoMesesAntiguedad === undefined) data.config.archivoMesesAntiguedad = 6;
+
+    // v3.22: Auto-recuperar usuarios desde las firmas de los datos.
+    // Si un nombre aparece como creadoPor / historial.usuario / evolucion.autor pero
+    // no está en config.usuarios, se agrega automáticamente con rol 'residente'.
+    // Esto resuelve el caso de personas que firmaron acciones sin estar formalmente
+    // registradas, o cuya entrada fue sobrescrita por otro dispositivo antes de v3.21.
+    (function autoRecuperarUsuarios() {
+      const ignorar = new Set(['', '(sin identificar)', 'sin identificar', null, undefined]);
+      const yaCentral = new Set((data.config.usuarios||[]).map(u => (u.nombre||'').toLowerCase().trim()));
+      const candidatos = new Map();   // nombreLower -> nombreOriginal (primera ocurrencia conservada)
+      const considerar = (nombre) => {
+        if (!nombre || typeof nombre !== 'string') return;
+        const limpio = nombre.trim();
+        if (!limpio) return;
+        const lower = limpio.toLowerCase();
+        if (ignorar.has(lower)) return;
+        if (yaCentral.has(lower)) return;
+        if (!candidatos.has(lower)) candidatos.set(lower, limpio);
+      };
+      (data.patients||[]).forEach(p => {
+        considerar(p.creadoPor);
+        (p.historial||[]).forEach(h => considerar(h.usuario));
+        (p.evoluciones||[]).forEach(e => considerar(e.autor));
+      });
+      (data.interconsultasEntrantes||[]).forEach(ic => considerar(ic.creadoPor));
+      (data.egresos||[]).forEach(eg => {
+        considerar(eg.creadoPor);
+        if (eg.verificadoStaff && eg.verificadoStaff.staffNombre) {
+          considerar(eg.verificadoStaff.staffNombre);
+        }
+      });
+      candidatos.forEach(nombre => {
+        data.config.usuarios.push({ nombre, rol: 'residente', autoRecuperado: true });
+      });
+    })();
 
     data.patients.forEach(p => {
       // Defaults para nuevos campos (v3.8) — pacientes anteriores no los tenían
