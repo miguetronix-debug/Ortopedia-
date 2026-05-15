@@ -641,7 +641,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.25-proteccion-edicion-2026-05-14';
+const APP_VERSION = 'v3.26-sw-indexeddb-2026-05-14';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const BACKUP_HISTORY_KEY = 'ortopedia_backups_v1';   // v3.23: backups locales rotativos
@@ -1597,6 +1597,13 @@ const Backups = {
       }
     }
     this._write(history);
+    // v3.26 (C6): espejar también en IndexedDB para sobrevivir a iOS Safari storage eviction.
+    // No bloquea — si IDB falla, los backups en localStorage siguen funcionando.
+    try {
+      IDB.put({ ...entry, kind: hayHoy ? 'recent' : 'daily' });
+      // mantener máximo 14 entradas en IDB (10 recent + 7 daily aprox.)
+      IDB.deleteOld(BACKUP_MAX_RECENT + BACKUP_MAX_DAILY);
+    } catch(e) { console.warn('[Backups] IDB mirror falló:', e); }
   },
   listar() {
     return this._read();
@@ -1610,9 +1617,99 @@ const Backups = {
     try { return JSON.parse(entry.data); }
     catch(e) { return null; }
   },
+  // v3.26 (C6): listar y restaurar desde IndexedDB como alternativa cuando localStorage fue evictado
+  async listarIDB() {
+    const entries = await IDB.getAll();
+    return entries.sort((a,b) => (b.timestamp||'').localeCompare(a.timestamp||''));
+  },
+  async restaurarIDB(timestamp) {
+    const entry = await IDB.get(timestamp);
+    if (!entry) return null;
+    try { return JSON.parse(entry.data); }
+    catch(e) { return null; }
+  },
   // Limpiar todos los backups locales (último recurso)
   limpiarTodos() {
     try { localStorage.removeItem(BACKUP_HISTORY_KEY); } catch(e){}
+  }
+};
+
+/* ---------- Espejo en IndexedDB (v3.26) ----------
+   localStorage en iOS Safari puede ser evictado tras 7 días de inactividad.
+   IndexedDB tiene política de eviction más favorable (especialmente con persist()).
+   Replicamos los snapshots de backup aquí para tener una segunda copia local más resistente.
+*/
+const IDB_NAME = 'ortopedia_backups_idb';
+const IDB_STORE = 'snapshots';
+const IDB = {
+  _db: null,
+  async _open() {
+    if (this._db) return this._db;
+    if (typeof indexedDB === 'undefined') return null;
+    return new Promise((resolve) => {
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onerror = () => { console.warn('[IDB] open error'); resolve(null); };
+      req.onsuccess = () => { this._db = req.result; resolve(this._db); };
+      req.onupgradeneeded = (ev) => {
+        const db = ev.target.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE, { keyPath: 'timestamp' });
+        }
+      };
+    });
+  },
+  async put(entry) {
+    const db = await this._open();
+    if (!db) return false;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        const store = tx.objectStore(IDB_STORE);
+        store.put(entry);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => { console.warn('[IDB] tx error', tx.error); resolve(false); };
+      } catch(e) { console.warn('[IDB] put error', e); resolve(false); }
+    });
+  },
+  async getAll() {
+    const db = await this._open();
+    if (!db) return [];
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction(IDB_STORE, 'readonly');
+        const store = tx.objectStore(IDB_STORE);
+        const req = store.getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => resolve([]);
+      } catch(e) { resolve([]); }
+    });
+  },
+  async get(timestamp) {
+    const db = await this._open();
+    if (!db) return null;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction(IDB_STORE, 'readonly');
+        const store = tx.objectStore(IDB_STORE);
+        const req = store.get(timestamp);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => resolve(null);
+      } catch(e) { resolve(null); }
+    });
+  },
+  async deleteOld(maxEntries = 14) {
+    // Mantener solo los últimos N por timestamp (descendente)
+    const all = await this.getAll();
+    if (all.length <= maxEntries) return;
+    all.sort((a,b) => (b.timestamp||'').localeCompare(a.timestamp||''));
+    const toDelete = all.slice(maxEntries);
+    const db = await this._open();
+    if (!db) return;
+    try {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IDB_STORE);
+      toDelete.forEach(e => store.delete(e.timestamp));
+    } catch(e){}
   }
 };
 
@@ -2854,6 +2951,54 @@ const App = {
     if (banner) banner.remove();
   },
 
+  // v3.26 (C6): Registrar service worker para offline + persistencia en iOS.
+  // Si sw.js no se encuentra (hosting sin ese archivo), falla silencioso.
+  async _registrarServiceWorker() {
+    if (!('serviceWorker' in navigator)) {
+      console.log('[SW] Service Workers no soportados en este navegador');
+      return;
+    }
+    try {
+      // Comprobar si el sw.js existe antes de intentar registrar (evita logs de error feos)
+      const test = await fetch('sw.js', { method: 'HEAD', cache: 'no-store' });
+      if (!test.ok) {
+        console.log('[SW] sw.js no encontrado en el servidor — la app funciona igual, pero sin cache offline.');
+        return;
+      }
+      const reg = await navigator.serviceWorker.register('sw.js');
+      console.log('[SW] Registrado:', reg.scope);
+      // Auto-actualizar cuando hay nueva versión
+      reg.addEventListener('updatefound', () => {
+        const nuevo = reg.installing;
+        if (!nuevo) return;
+        nuevo.addEventListener('statechange', () => {
+          if (nuevo.state === 'installed' && navigator.serviceWorker.controller) {
+            console.log('[SW] Nueva versión instalada — se activará al recargar.');
+          }
+        });
+      });
+    } catch(e) {
+      console.warn('[SW] Error registrando:', e.message || e);
+    }
+  },
+
+  async _pedirPersistencia() {
+    if (!navigator.storage || !navigator.storage.persist) return;
+    try {
+      const yaPersistido = await navigator.storage.persisted();
+      if (yaPersistido) {
+        console.log('[Storage] Almacenamiento ya es persistente.');
+        return;
+      }
+      // Pedir persistencia. En iOS / Safari requiere que la app esté instalada como PWA.
+      // En Chrome desktop se otorga automáticamente si la app tiene engagement alto.
+      const otorgado = await navigator.storage.persist();
+      console.log('[Storage] Persistencia ' + (otorgado ? 'OTORGADA' : 'no otorgada (aún)'));
+    } catch(e) {
+      console.warn('[Storage] persist() falló:', e.message || e);
+    }
+  },
+
   async init() {
     // Mostrar versión visible
     const v = document.getElementById('appVersionLabel');
@@ -2861,6 +3006,11 @@ const App = {
 
     // Aplicar tema guardado (modo oscuro)
     this._aplicarTema();
+
+    // v3.26 (C6): registrar service worker (silencioso si no hay sw.js)
+    this._registrarServiceWorker();
+    // v3.26 (C6): pedir almacenamiento persistente (best-effort, sin bloquear)
+    this._pedirPersistencia();
 
     State.load();
     this._refreshUserBadge();
@@ -3162,6 +3312,22 @@ const App = {
             </div>
 
             <div class="setup-step">
+              <h3>Estado de almacenamiento (v3.26)</h3>
+              <p class="muted" style="font-size:.85rem">
+                En iOS Safari y algunos navegadores móviles, los datos locales pueden ser borrados
+                automáticamente después de varios días sin uso. La app intenta marcar el
+                almacenamiento como "persistente" para resistir esa eviction.
+              </p>
+              <div id="storageStatusBlock" class="muted" style="font-size:.85rem">Comprobando…</div>
+              <div style="margin-top:6px">
+                <button class="btn ghost small" onclick="App.refreshStorageStatus()">🔄 Verificar</button>
+                <button class="btn ghost small" onclick="App.pedirPersistenciaManual()">📌 Solicitar persistencia</button>
+                <button class="btn ghost small" onclick="App.listarBackupsIDB()">📂 Ver respaldos en IndexedDB</button>
+              </div>
+              <div id="idbBackupList" style="margin-top:10px"></div>
+            </div>
+
+            <div class="setup-step">
               <h3>Respaldos automáticos (v3.23)</h3>
               <p class="muted" style="font-size:.85rem">
                 La app mantiene copias automáticas de la base completa en este dispositivo para que puedas
@@ -3353,6 +3519,8 @@ service cloud.firestore {
     document.getElementById('modalRoot').innerHTML = html;
     // v3.23: cargar lista de respaldos en la nube en background
     setTimeout(() => { try { this.refreshCloudBackups(); } catch(e){} }, 100);
+    // v3.26 (C6): refrescar estado de almacenamiento
+    setTimeout(() => { try { this.refreshStorageStatus(); } catch(e){} }, 100);
   },
 
   setHospitalConfig(campo, valor) {
@@ -8907,6 +9075,127 @@ service cloud.firestore {
     await CloudBackups.asegurarBackupDeHoy();
     alert('Verificación de respaldo de hoy completada.');
     this.refreshCloudBackups();
+  },
+
+  /* ---------- Almacenamiento e IndexedDB (v3.26) ---------- */
+  async refreshStorageStatus() {
+    const cont = document.getElementById('storageStatusBlock');
+    if (!cont) return;
+    let html = '';
+    // Persistencia
+    if (navigator.storage && navigator.storage.persisted) {
+      try {
+        const persistido = await navigator.storage.persisted();
+        html += '<div><strong>Persistencia:</strong> ' +
+          (persistido ? '<span style="color:#059669">✓ otorgada</span>' : '<span style="color:#92400e">✗ no otorgada</span>') +
+          '</div>';
+      } catch(e) {}
+    } else {
+      html += '<div><strong>Persistencia:</strong> no soportada en este navegador</div>';
+    }
+    // Quota
+    if (navigator.storage && navigator.storage.estimate) {
+      try {
+        const e = await navigator.storage.estimate();
+        const usadoMB = (e.usage/1024/1024).toFixed(1);
+        const quotaMB = (e.quota/1024/1024).toFixed(0);
+        const pct = ((e.usage/e.quota)*100).toFixed(1);
+        html += '<div><strong>Espacio usado:</strong> ' + usadoMB + ' MB de ' + quotaMB + ' MB (' + pct + '%)</div>';
+      } catch(e) {}
+    }
+    // Service Worker
+    if ('serviceWorker' in navigator) {
+      try {
+        const reg = await navigator.serviceWorker.getRegistration();
+        html += '<div><strong>Service Worker:</strong> ' +
+          (reg ? '<span style="color:#059669">✓ activo</span> (' + escapeHtml(reg.scope) + ')'
+               : '<span style="color:#92400e">no registrado</span> — sube <code>sw.js</code> junto al index.html') +
+          '</div>';
+      } catch(e) {}
+    } else {
+      html += '<div><strong>Service Worker:</strong> no soportado</div>';
+    }
+    // Backups en IDB
+    try {
+      const lista = await Backups.listarIDB();
+      html += '<div><strong>Respaldos en IndexedDB:</strong> ' + lista.length + ' snapshot(s)</div>';
+    } catch(e) {}
+    cont.innerHTML = html;
+  },
+
+  async pedirPersistenciaManual() {
+    if (!navigator.storage || !navigator.storage.persist) {
+      alert('Este navegador no soporta solicitar persistencia.');
+      return;
+    }
+    try {
+      const otorgado = await navigator.storage.persist();
+      alert(otorgado
+        ? 'Persistencia OTORGADA. Tus datos locales son más resistentes a eviction.'
+        : 'No se pudo otorgar persistencia automáticamente.\n\nEn iOS / Safari, instala la app como PWA (Compartir → Añadir a pantalla de inicio) y vuelve a intentar.\n\nEn Chrome desktop, se otorga al usar la app con frecuencia.');
+      this.refreshStorageStatus();
+    } catch(e) {
+      alert('Error: ' + e.message);
+    }
+  },
+
+  async listarBackupsIDB() {
+    const cont = document.getElementById('idbBackupList');
+    if (!cont) return;
+    cont.innerHTML = '<em class="muted" style="font-size:.85rem">Cargando…</em>';
+    try {
+      const lista = await Backups.listarIDB();
+      if (lista.length === 0) {
+        cont.innerHTML = '<em class="muted" style="font-size:.85rem">No hay respaldos en IndexedDB. Se crearán al editar pacientes.</em>';
+        return;
+      }
+      this._idbBackupsCache = {};
+      cont.innerHTML = lista.map(e => {
+        this._idbBackupsCache[e.timestamp] = true;
+        const t = new Date(e.timestamp).toLocaleString('es');
+        const r = e.resumen || {};
+        return '<div class="card compact" style="margin-bottom:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+          '<div style="flex:1;min-width:200px;font-size:.85rem">' +
+            '<strong>' + escapeHtml(t) + '</strong> <span class="tag gray">' + escapeHtml(e.kind||'') + '</span>' +
+            '<div class="muted" style="font-size:.78rem">' + (r.pacientesActivos||0) + ' activos · ' + (r.pacientes||0) + ' totales · ' + (r.programas||0) + ' programas · ' + (r.egresos||0) + ' egresos · ' + (r.usuarios||0) + ' usuarios · ' + (e.tamanoKB||0) + ' KB</div>' +
+          '</div>' +
+          '<button class="btn small" data-ts="' + escapeHtml(e.timestamp) + '" onclick="App._handleRestaurarIDB(this)">Restaurar</button>' +
+        '</div>';
+      }).join('');
+    } catch(err) {
+      cont.innerHTML = '<em class="muted" style="color:#dc2626">Error: ' + escapeHtml(err.message||'') + '</em>';
+    }
+  },
+
+  async _handleRestaurarIDB(btn) {
+    const ts = btn.dataset.ts;
+    if (!ts) return;
+    const restaurado = await Backups.restaurarIDB(ts);
+    if (!restaurado) { alert('No se pudo cargar el respaldo de IndexedDB.'); return; }
+    const r = {
+      pacientes: (restaurado.patients||[]).length,
+      activos: (restaurado.patients||[]).filter(p => !p.fechaEgreso).length,
+      programas: (restaurado.programas||[]).length,
+      egresos: (restaurado.egresos||[]).length,
+      usuarios: (restaurado.config && restaurado.config.usuarios ? restaurado.config.usuarios.length : 0)
+    };
+    const fecha = new Date(ts).toLocaleString('es');
+    const msg = '¿Restaurar el respaldo del ' + fecha + ' desde IndexedDB?\n\n' +
+                'Contiene:\n' +
+                '  • ' + r.pacientes + ' pacientes (' + r.activos + ' activos)\n' +
+                '  • ' + r.programas + ' programas\n' +
+                '  • ' + r.egresos + ' egresos\n' +
+                '  • ' + r.usuarios + ' usuarios\n\n' +
+                'Esto va a REEMPLAZAR los datos actuales (también en la nube). ' +
+                'Antes se guardará un respaldo local automático por si te arrepientes.';
+    if (!confirm(msg)) return;
+    Backups.guardar(State.data);
+    State.data = restaurado;
+    State._migrar();   // C2
+    State.save();
+    this.closeModal();
+    this.render();
+    alert('Respaldo restaurado desde IndexedDB.');
   },
 
   /* ---------- Google Drive (v3.23) ---------- */
