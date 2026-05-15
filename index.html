@@ -641,13 +641,14 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.28-analizador-tamano-2026-05-14';
+const APP_VERSION = 'v3.29-split-historial-2026-05-14';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const BACKUP_HISTORY_KEY = 'ortopedia_backups_v1';   // v3.23: backups locales rotativos
 const BACKUP_MAX_RECENT = 10;                          // últimos 10 cambios significativos
 const BACKUP_MAX_DAILY = 7;                            // últimos 7 días
-const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
+const FB_DOC_PATH = 'apps/ortopedia';   // Documento principal: patients (sin historial), programas, egresos, IC, config
+const FB_HISTORIAL_PATH = 'apps/ortopedia_historial';   // v3.29: historial separado para no chocar con 1MB
 const FB_BACKUP_COL = 'ortopedia_backups';   // v3.23: colección de respaldos diarios
 const CLOUD_BACKUP_MAX_DAYS = 30;             // Mantener últimos N días en Firebase
 const DRIVE_OAUTH_KEY = 'ortopedia_drive_oauth_v1';   // v3.23: token OAuth de Google Drive
@@ -2342,26 +2343,101 @@ const Sync = {
       try { await this.db.enablePersistence({ synchronizeTabs: true }); }
       catch(e) { console.warn('Persistencia offline no activa:', e.code || e.message); }
 
-      const ref = this.db.doc(FB_DOC_PATH);
-      this.unsubscribe = ref.onSnapshot(
+      // v3.29: dos suscripciones — documento principal + documento de historial separado.
+      // Esto duplica la capacidad efectiva (cada doc ≤1MB) y aísla el dato más volátil.
+      const refMain = this.db.doc(FB_DOC_PATH);
+      const refHist = this.db.doc(FB_HISTORIAL_PATH);
+
+      this._unsubscribeMain = refMain.onSnapshot(
         (snap) => {
           this.setStatus('online');
-          // v3.23: marcar que ya recibimos un snapshot — desde ahora es seguro pushear.
           this.hasReceivedSnapshot = true;
-          // v3.23: programar verificación de backup diario (idempotente)
+          // Backups diarios (idempotentes)
           setTimeout(() => { try { CloudBackups.asegurarBackupDeHoy(); } catch(e){} }, 3000);
-          // v3.23: subir backup a Google Drive si está autorizado (idempotente, 1 vez por día)
           setTimeout(() => {
-            try {
-              if (DriveBackup.isAuthorized()) DriveBackup.subirBackupDeHoy();
-            } catch(e){}
+            try { if (DriveBackup.isAuthorized()) DriveBackup.subirBackupDeHoy(); } catch(e){}
           }, 5000);
-          if (this.ignoreNextRemote) {
-            this.ignoreNextRemote = false;
-            return;
-          }
-          const remote = snap.exists ? snap.data() : null;
-          if (remote && remote.patients) {
+          if (this._ignoreNextMain) { this._ignoreNextMain = false; return; }
+          this._mainSnap = snap.exists ? snap.data() : null;
+          this._aplicarSnapshots();
+        },
+        (err) => {
+          console.error('Firestore error (main):', err);
+          this.setStatus('error', 'Error: ' + (err.code || err.message || ''));
+          alert('Error de Firebase: ' + (err.message || err.code) +
+            '\n\nVerifica las reglas de Firestore. Necesitas reglas para apps/ortopedia Y apps/ortopedia_historial.');
+        }
+      );
+
+      this._unsubscribeHist = refHist.onSnapshot(
+        (snap) => {
+          if (this._ignoreNextHist) { this._ignoreNextHist = false; return; }
+          this._histSnap = snap.exists ? snap.data() : null;
+          // Solo aplicar si ya tenemos el main; sino esperar a que llegue
+          if (this._mainSnap) this._aplicarSnapshots();
+        },
+        (err) => {
+          console.warn('Firestore error (historial):', err);
+          // No es fatal — el dispositivo puede operar sin historial
+        }
+      );
+
+      // Forzar que el primer snapshot del historial llegue aunque no exista (provoca pull)
+      refHist.get().then(snap => {
+        if (!snap.exists) this._histSnap = { byPatient: {} };
+      }).catch(()=>{});
+
+      this.unsubscribe = () => {
+        if (this._unsubscribeMain) this._unsubscribeMain();
+        if (this._unsubscribeHist) this._unsubscribeHist();
+      };
+
+      window.addEventListener('online', () => { if (this.status==='offline') this.setStatus('online'); });
+      window.addEventListener('offline', () => this.setStatus('offline'));
+      return true;
+    } catch(e) {
+      console.error(e);
+      this.setStatus('error', e.message);
+      alert('No se pudo conectar a Firebase: ' + e.message);
+      return false;
+    }
+  },
+
+  // v3.29: aplicar snapshots combinados (main + historial) — el resto del código
+  // ve un objeto unificado idéntico al modelo anterior, con historial dentro de cada paciente.
+  _aplicarSnapshots() {
+    if (!this._mainSnap) return;
+    const main = this._mainSnap;
+    const hist = this._histSnap || { byPatient: {} };
+    // Backward-compat: si todavía hay historial dentro de los pacientes (formato viejo),
+    // priorizar el más largo entre los dos
+    const byPatient = Object.assign({}, hist.byPatient || {});
+    (main.patients || []).forEach(p => {
+      if (Array.isArray(p.historial) && p.historial.length > 0) {
+        const ex = byPatient[p.id];
+        if (!ex || ex.length < p.historial.length) byPatient[p.id] = p.historial;
+      }
+    });
+    // Merge historial de vuelta en los pacientes
+    const patientsMerged = (main.patients || []).map(p => {
+      const out = Object.assign({}, p);
+      out.historial = byPatient[p.id] || [];
+      return out;
+    });
+    // Synthetic remote para el resto de la lógica que ya existía
+    const remote = {
+      patients: patientsMerged,
+      programas: main.programas || [],
+      egresos: main.egresos || [],
+      interconsultasEntrantes: main.interconsultasEntrantes || [],
+      config: main.config || {},
+      lastWrite: main.lastWrite
+    };
+    this._procesarRemote(remote);
+  },
+
+  _procesarRemote(remote) {
+    if (remote && remote.patients) {
             // v3.21: fusionar config (usuarios + catálogos) por unión para evitar
             // pérdida por "last writer wins" cuando varios dispositivos guardan a la vez.
             const remoteCfg = remote.config || {};
@@ -2454,27 +2530,9 @@ const Sync = {
             if (needsRepush) {
               this.scheduleSave();
             }
-          } else if (snap && !snap.exists) {
-            // Documento no existe; subir lo local
-            this.pushNow();
-          }
-        },
-        (err) => {
-          console.error('Firestore error:', err);
-          this.setStatus('error', 'Error: ' + (err.code || err.message || ''));
-          alert('Error de Firebase: ' + (err.message || err.code) +
-            '\n\nVerifica las reglas de Firestore en la consola.');
-        }
-      );
-
-      window.addEventListener('online', () => { if (this.status==='offline') this.setStatus('online'); });
-      window.addEventListener('offline', () => this.setStatus('offline'));
-      return true;
-    } catch(e) {
-      console.error(e);
-      this.setStatus('error', e.message);
-      alert('No se pudo conectar a Firebase: ' + e.message);
-      return false;
+    } else {
+      // No hay documento principal todavía — subir lo que tenemos localmente
+      this.pushNow();
     }
   },
 
@@ -2514,50 +2572,80 @@ const Sync = {
   async pushNow() {
     if (!this.db) return;
     // v3.23: gate de protección. NUNCA pushear antes de haber recibido al menos
-    // un snapshot desde Firebase. Esto previene que un dispositivo recién abierto con
-    // localStorage vacío sobrescriba la base remota con un estado vacío.
+    // un snapshot desde Firebase.
     if (!this.hasReceivedSnapshot) {
       console.warn('[Sync] Push bloqueado: aún no se ha recibido el primer snapshot. Reintento programado.');
       this._scheduleRetry();
       return;
     }
     try {
-      const ref = this.db.doc(FB_DOC_PATH);
-      this.ignoreNextRemote = true;
-      const payload = {
-        patients: State.data.patients || [],
+      // v3.29: split del documento en dos.
+      // - Main payload: patients sin historial, programas, egresos, IC, config
+      // - Historial payload: { byPatient: {id: [entries], ...} }
+      const patientsClean = (State.data.patients || []).map(p => {
+        const out = Object.assign({}, p);
+        delete out.historial;
+        return out;
+      });
+      const byPatient = {};
+      (State.data.patients || []).forEach(p => {
+        if (Array.isArray(p.historial) && p.historial.length > 0) {
+          byPatient[p.id] = p.historial;
+        }
+      });
+
+      const mainPayload = {
+        patients: patientsClean,
         programas: State.data.programas || [],
         egresos: State.data.egresos || [],
         interconsultasEntrantes: State.data.interconsultasEntrantes || [],
         config: State.data.config || {},
-        lastWrite: Date.now()
+        lastWrite: Date.now(),
+        _historialSplit: true   // marker para indicar que esta versión separa el historial
       };
-      // v3.24 (C4 parcial): chequeo de tamaño preventivo (Firestore tope 1 MB).
-      const tamano = new Blob([JSON.stringify(payload)]).size;
-      if (tamano > 950000) {
-        const kb = Math.round(tamano / 1024);
+      const historialPayload = {
+        byPatient,
+        lastWrite: mainPayload.lastWrite
+      };
+
+      // v3.24 (C4 parcial) + v3.29: chequeo de tamaño por documento. Cada uno tiene su propio 1MB.
+      const mainSize = new Blob([JSON.stringify(mainPayload)]).size;
+      const histSize = new Blob([JSON.stringify(historialPayload)]).size;
+      const limiteWarn = 950000, limiteHard = 1040000;
+      if (mainSize > limiteWarn || histSize > limiteWarn) {
+        const kbM = Math.round(mainSize / 1024);
+        const kbH = Math.round(histSize / 1024);
         if (!this._sizeWarningShown) {
           this._sizeWarningShown = true;
-          alert('⚠ La base de datos pesa ' + kb + ' KB, muy cerca del límite de Firestore (1024 KB).\n\n' +
+          alert('⚠ Base cerca del límite de Firestore.\n\n' +
+            ' • Documento principal: ' + kbM + ' KB\n' +
+            ' • Documento de historial: ' + kbH + ' KB\n\n' +
             'Considera:\n' +
-            ' • Archivar pacientes egresados antiguos (engrane → Archivado)\n' +
-            ' • Hacer un respaldo manual antes de seguir editando\n\n' +
-            'Si excede el límite, los cambios dejarán de subir a la nube.');
+            ' • Archivar pacientes egresados antiguos\n' +
+            ' • Compactar historial (engrane → Análisis de tamaño)\n' +
+            ' • Exportar un respaldo manual antes de seguir editando');
         }
-        if (tamano > 1040000) {
-          // Excede el límite duro — abortar para no perder los datos
-          this.ignoreNextRemote = false;
+        if (mainSize > limiteHard || histSize > limiteHard) {
           this.setStatus('error', 'Base demasiado grande');
-          throw new Error('Documento excede 1 MB (' + kb + ' KB). Imposible subir.');
+          throw new Error('Documento excede 1 MB (main=' + kbM + 'KB, hist=' + kbH + 'KB). Imposible subir.');
         }
       }
-      State.data.lastWrite = payload.lastWrite;
-      await ref.set(payload);
+
+      State.data.lastWrite = mainPayload.lastWrite;
+      // Marcar ambos snapshots de eco para que no nos vuelvan a procesar
+      this._ignoreNextMain = true;
+      this._ignoreNextHist = true;
+      // Batch write: ambos documentos suben atómicamente
+      const batch = this.db.batch();
+      batch.set(this.db.doc(FB_DOC_PATH), mainPayload);
+      batch.set(this.db.doc(FB_HISTORIAL_PATH), historialPayload);
+      await batch.commit();
       this.setStatus('online');
       this._clearRetry();    // éxito → resetear contador
     } catch(e) {
       console.error('Error guardando en la nube:', e);
-      this.ignoreNextRemote = false;
+      this._ignoreNextMain = false;
+      this._ignoreNextHist = false;
       if (!navigator.onLine) {
         this.setStatus('offline');
       } else {
@@ -2582,6 +2670,10 @@ const Sync = {
     this._clearRetry();
     this.app = null; this.db = null;
     this.hasReceivedSnapshot = false;  // resetear gate al reconectar
+    this._mainSnap = null;
+    this._histSnap = null;
+    this._ignoreNextMain = false;
+    this._ignoreNextHist = false;
     this.setStatus('local');
   }
 };
@@ -3648,6 +3740,9 @@ service cloud.firestore {
     match /apps/ortopedia {
       allow read, write: if true;
     }
+    match /apps/ortopedia_historial {
+      allow read, write: if true;
+    }
     match /ortopedia_backups/{fecha} {
       allow read, write: if true;
     }
@@ -3657,6 +3752,9 @@ service cloud.firestore {
 service cloud.firestore {
   match /databases/{database}/documents {
     match /apps/ortopedia {
+      allow read, write: if true;
+    }
+    match /apps/ortopedia_historial {
       allow read, write: if true;
     }
     match /ortopedia_backups/{fecha} {
