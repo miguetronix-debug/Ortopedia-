@@ -641,14 +641,16 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.29-split-historial-2026-05-14';
+const APP_VERSION = 'v3.30-sharding-total-2026-05-14';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const BACKUP_HISTORY_KEY = 'ortopedia_backups_v1';   // v3.23: backups locales rotativos
 const BACKUP_MAX_RECENT = 10;                          // últimos 10 cambios significativos
 const BACKUP_MAX_DAILY = 7;                            // últimos 7 días
-const FB_DOC_PATH = 'apps/ortopedia';   // Documento principal: patients (sin historial), programas, egresos, IC, config
-const FB_HISTORIAL_PATH = 'apps/ortopedia_historial';   // v3.29: historial separado para no chocar con 1MB
+const FB_DOC_PATH = 'apps/ortopedia';   // Documento principal: programas, egresos, IC, config (sin patients tras v3.30)
+const FB_HISTORIAL_PATH = 'apps/ortopedia_historial';   // v3.29 legacy — solo lectura para migración
+const FB_PATIENTS_COL = 'ortopedia_patients';     // v3.30: cada paciente es un documento de esta colección
+const FB_HISTORIAL_COL = 'ortopedia_historial_v2';  // v3.30: historial sharded — un doc por paciente
 const FB_BACKUP_COL = 'ortopedia_backups';   // v3.23: colección de respaldos diarios
 const CLOUD_BACKUP_MAX_DAYS = 30;             // Mantener últimos N días en Firebase
 const DRIVE_OAUTH_KEY = 'ortopedia_drive_oauth_v1';   // v3.23: token OAuth de Google Drive
@@ -2343,53 +2345,94 @@ const Sync = {
       try { await this.db.enablePersistence({ synchronizeTabs: true }); }
       catch(e) { console.warn('Persistencia offline no activa:', e.code || e.message); }
 
-      // v3.29: dos suscripciones — documento principal + documento de historial separado.
-      // Esto duplica la capacidad efectiva (cada doc ≤1MB) y aísla el dato más volátil.
-      const refMain = this.db.doc(FB_DOC_PATH);
-      const refHist = this.db.doc(FB_HISTORIAL_PATH);
+      // v3.30: SHARDING COMPLETO — tres suscripciones independientes:
+      //   1. apps/ortopedia (doc): programas, egresos, IC, config (pequeño, acotado)
+      //   2. ortopedia_patients (colección): un doc por paciente → capacidad sin tope práctico
+      //   3. ortopedia_historial_v2 (colección): un doc por paciente con su historial
+      // Cada documento tiene su propio límite de 1MB y se sincronizan independientemente.
+      this._patientsCache = {};      // {patientId: patient data} desde la subcolección
+      this._historialCache = {};     // {patientId: [entries]} desde la subcolección
+      this._initialPatientsLoaded = false;
+      this._initialHistorialLoaded = false;
+      this._initialMainLoaded = false;
 
+      const refMain = this.db.doc(FB_DOC_PATH);
+      const colPatients = this.db.collection(FB_PATIENTS_COL);
+      const colHistorial = this.db.collection(FB_HISTORIAL_COL);
+
+      // 1. Documento principal
       this._unsubscribeMain = refMain.onSnapshot(
         (snap) => {
           this.setStatus('online');
           this.hasReceivedSnapshot = true;
-          // Backups diarios (idempotentes)
           setTimeout(() => { try { CloudBackups.asegurarBackupDeHoy(); } catch(e){} }, 3000);
           setTimeout(() => {
             try { if (DriveBackup.isAuthorized()) DriveBackup.subirBackupDeHoy(); } catch(e){}
           }, 5000);
           if (this._ignoreNextMain) { this._ignoreNextMain = false; return; }
           this._mainSnap = snap.exists ? snap.data() : null;
+          this._initialMainLoaded = true;
+          // Si el doc tiene patients inline (formato pre-v3.30), correr migración
+          if (this._mainSnap && Array.isArray(this._mainSnap.patients) && this._mainSnap.patients.length > 0
+              && !this._mainSnap._shardingMigrated) {
+            this._migrarASharding();
+          }
           this._aplicarSnapshots();
         },
         (err) => {
           console.error('Firestore error (main):', err);
           this.setStatus('error', 'Error: ' + (err.code || err.message || ''));
           alert('Error de Firebase: ' + (err.message || err.code) +
-            '\n\nVerifica las reglas de Firestore. Necesitas reglas para apps/ortopedia Y apps/ortopedia_historial.');
+            '\n\nVerifica las reglas de Firestore. Necesitas reglas para apps/ortopedia, ortopedia_patients/* y ortopedia_historial_v2/*.');
         }
       );
 
-      this._unsubscribeHist = refHist.onSnapshot(
+      // 2. Colección de pacientes
+      this._unsubscribePatients = colPatients.onSnapshot(
         (snap) => {
-          if (this._ignoreNextHist) { this._ignoreNextHist = false; return; }
-          this._histSnap = snap.exists ? snap.data() : null;
-          // Solo aplicar si ya tenemos el main; sino esperar a que llegue
-          if (this._mainSnap) this._aplicarSnapshots();
+          if (this._ignoreNextCollections) {
+            // los echo de nuestros propios writes pueden generar muchos cambios; ignorar este batch
+            // (se resetea en _aplicarSnapshots)
+          }
+          snap.docChanges().forEach(change => {
+            const id = change.doc.id;
+            if (change.type === 'added' || change.type === 'modified') {
+              this._patientsCache[id] = change.doc.data();
+            } else if (change.type === 'removed') {
+              delete this._patientsCache[id];
+            }
+          });
+          this._initialPatientsLoaded = true;
+          this._aplicarSnapshots();
         },
         (err) => {
-          console.warn('Firestore error (historial):', err);
-          // No es fatal — el dispositivo puede operar sin historial
+          console.error('Firestore error (patients collection):', err);
         }
       );
 
-      // Forzar que el primer snapshot del historial llegue aunque no exista (provoca pull)
-      refHist.get().then(snap => {
-        if (!snap.exists) this._histSnap = { byPatient: {} };
-      }).catch(()=>{});
+      // 3. Colección de historial
+      this._unsubscribeHistorial = colHistorial.onSnapshot(
+        (snap) => {
+          snap.docChanges().forEach(change => {
+            const id = change.doc.id;
+            if (change.type === 'added' || change.type === 'modified') {
+              this._historialCache[id] = (change.doc.data().entries || []);
+            } else if (change.type === 'removed') {
+              delete this._historialCache[id];
+            }
+          });
+          this._initialHistorialLoaded = true;
+          this._aplicarSnapshots();
+        },
+        (err) => {
+          console.warn('Firestore error (historial collection):', err);
+        }
+      );
 
       this.unsubscribe = () => {
         if (this._unsubscribeMain) this._unsubscribeMain();
-        if (this._unsubscribeHist) this._unsubscribeHist();
+        if (this._unsubscribePatients) this._unsubscribePatients();
+        if (this._unsubscribeHistorial) this._unsubscribeHistorial();
       };
 
       window.addEventListener('online', () => { if (this.status==='offline') this.setStatus('online'); });
@@ -2403,28 +2446,33 @@ const Sync = {
     }
   },
 
-  // v3.29: aplicar snapshots combinados (main + historial) — el resto del código
-  // ve un objeto unificado idéntico al modelo anterior, con historial dentro de cada paciente.
+  // v3.30: combinar caches del modelo sharded (3 fuentes) en un estado unificado.
+  // Esperar a que las TRES suscripciones hayan tenido al menos un evento antes de aplicar,
+  // para no procesar estados parciales que vacíen la UI temporalmente.
   _aplicarSnapshots() {
-    if (!this._mainSnap) return;
-    const main = this._mainSnap;
-    const hist = this._histSnap || { byPatient: {} };
-    // Backward-compat: si todavía hay historial dentro de los pacientes (formato viejo),
-    // priorizar el más largo entre los dos
-    const byPatient = Object.assign({}, hist.byPatient || {});
-    (main.patients || []).forEach(p => {
-      if (Array.isArray(p.historial) && p.historial.length > 0) {
-        const ex = byPatient[p.id];
-        if (!ex || ex.length < p.historial.length) byPatient[p.id] = p.historial;
-      }
-    });
-    // Merge historial de vuelta en los pacientes
-    const patientsMerged = (main.patients || []).map(p => {
+    if (!this._initialMainLoaded) return;
+    if (!this._initialPatientsLoaded) return;
+    // historial puede tardar más; permitir aplicar sin él (los pacientes simplemente
+    // mostrarán historial vacío hasta que llegue, lo cual es seguro).
+    const main = this._mainSnap || {};
+
+    // Backward-compat: si main todavía trae patients inline (versión antigua), incluirlos
+    const fromMain = Array.isArray(main.patients) ? main.patients : [];
+    const fromCache = Object.values(this._patientsCache || {});
+    // Merge: la subcolección gana sobre los inline si los IDs colisionan
+    const byId = {};
+    fromMain.forEach(p => { byId[p.id] = p; });
+    fromCache.forEach(p => { byId[p.id] = p; });
+
+    // Adjuntar historial de cada paciente (preferir subcolección, fallback a inline)
+    const patientsMerged = Object.values(byId).map(p => {
       const out = Object.assign({}, p);
-      out.historial = byPatient[p.id] || [];
+      const histColeccion = this._historialCache[p.id];
+      const histInline = Array.isArray(p.historial) ? p.historial : null;
+      out.historial = histColeccion || histInline || [];
       return out;
     });
-    // Synthetic remote para el resto de la lógica que ya existía
+
     const remote = {
       patients: patientsMerged,
       programas: main.programas || [],
@@ -2434,6 +2482,44 @@ const Sync = {
       lastWrite: main.lastWrite
     };
     this._procesarRemote(remote);
+  },
+
+  // v3.30: Migración one-time de pacientes inline → subcolección.
+  // Se dispara cuando el main doc todavía tiene patients[] no vacío y no está marcado como migrado.
+  async _migrarASharding() {
+    if (this._migracionEnCurso) return;
+    this._migracionEnCurso = true;
+    const patientes = (this._mainSnap.patients || []).slice();
+    console.log('[Sharding] Iniciando migración de ' + patientes.length + ' pacientes...');
+    try {
+      // 1. Escribir cada paciente en la subcolección (en lotes de 400 para no exceder batch limit de 500)
+      for (let i = 0; i < patientes.length; i += 400) {
+        const slice = patientes.slice(i, i + 400);
+        const batch = this.db.batch();
+        slice.forEach(p => {
+          const { historial, ...rest } = p;
+          batch.set(this.db.collection(FB_PATIENTS_COL).doc(p.id), rest);
+          if (Array.isArray(historial) && historial.length > 0) {
+            batch.set(this.db.collection(FB_HISTORIAL_COL).doc(p.id), { entries: historial });
+          }
+        });
+        await batch.commit();
+        console.log('[Sharding] Lote ' + Math.floor(i/400 + 1) + ' completado.');
+      }
+      // 2. Limpiar el main doc — eliminar patients y marcar migrado
+      this._ignoreNextMain = true;
+      await this.db.doc(FB_DOC_PATH).update({
+        patients: [],
+        _shardingMigrated: true,
+        _migracionTimestamp: Date.now()
+      });
+      console.log('[Sharding] Migración completada. Patients vaciado del main doc.');
+    } catch(e) {
+      console.error('[Sharding] Error en migración:', e);
+      alert('Error durante la migración a sharding:\n' + e.message + '\n\nLos datos están a salvo (en main doc).');
+    } finally {
+      this._migracionEnCurso = false;
+    }
   },
 
   _procesarRemote(remote) {
@@ -2571,81 +2657,126 @@ const Sync = {
 
   async pushNow() {
     if (!this.db) return;
-    // v3.23: gate de protección. NUNCA pushear antes de haber recibido al menos
-    // un snapshot desde Firebase.
     if (!this.hasReceivedSnapshot) {
       console.warn('[Sync] Push bloqueado: aún no se ha recibido el primer snapshot. Reintento programado.');
       this._scheduleRetry();
       return;
     }
     try {
-      // v3.29: split del documento en dos.
-      // - Main payload: patients sin historial, programas, egresos, IC, config
-      // - Historial payload: { byPatient: {id: [entries], ...} }
-      const patientsClean = (State.data.patients || []).map(p => {
-        const out = Object.assign({}, p);
-        delete out.historial;
-        return out;
-      });
-      const byPatient = {};
-      (State.data.patients || []).forEach(p => {
-        if (Array.isArray(p.historial) && p.historial.length > 0) {
-          byPatient[p.id] = p.historial;
-        }
-      });
+      // v3.30: Push DELTA. Solo se escriben pacientes/historiales que cambiaron
+      // respecto a la caché remota. Más main doc con programas/egresos/IC/config.
 
+      const now = Date.now();
+      const localPatients = State.data.patients || [];
+
+      // Main payload — datos pequeños/acotados (sin pacientes)
       const mainPayload = {
-        patients: patientsClean,
+        // Mantener patients vacío para compatibilidad de lectura — la subcolección es la fuente real
+        patients: [],
         programas: State.data.programas || [],
         egresos: State.data.egresos || [],
         interconsultasEntrantes: State.data.interconsultasEntrantes || [],
         config: State.data.config || {},
-        lastWrite: Date.now(),
-        _historialSplit: true   // marker para indicar que esta versión separa el historial
-      };
-      const historialPayload = {
-        byPatient,
-        lastWrite: mainPayload.lastWrite
+        lastWrite: now,
+        _shardingMigrated: true
       };
 
-      // v3.24 (C4 parcial) + v3.29: chequeo de tamaño por documento. Cada uno tiene su propio 1MB.
-      const mainSize = new Blob([JSON.stringify(mainPayload)]).size;
-      const histSize = new Blob([JSON.stringify(historialPayload)]).size;
-      const limiteWarn = 950000, limiteHard = 1040000;
-      if (mainSize > limiteWarn || histSize > limiteWarn) {
-        const kbM = Math.round(mainSize / 1024);
-        const kbH = Math.round(histSize / 1024);
+      // Diff pacientes: comparar local con _patientsCache (versión más reciente recibida)
+      const cache = this._patientsCache || {};
+      const histCache = this._historialCache || {};
+      const writes = [];   // [{type, ref, data}] para batchear
+      const localIds = new Set();
+      localPatients.forEach(p => {
+        localIds.add(p.id);
+        const { historial, ...rest } = p;
+        // Comparar con caché remota; si difiere, escribir
+        const cached = cache[p.id];
+        const restStr = JSON.stringify(rest);
+        const cachedStr = cached ? JSON.stringify(cached) : null;
+        if (cachedStr !== restStr) {
+          writes.push({
+            type: 'set',
+            ref: this.db.collection(FB_PATIENTS_COL).doc(p.id),
+            data: rest
+          });
+        }
+        // Historial separado
+        const histLocal = Array.isArray(historial) ? historial : [];
+        const histCached = Array.isArray(histCache[p.id]) ? histCache[p.id] : [];
+        if (JSON.stringify(histLocal) !== JSON.stringify(histCached)) {
+          if (histLocal.length > 0) {
+            writes.push({
+              type: 'set',
+              ref: this.db.collection(FB_HISTORIAL_COL).doc(p.id),
+              data: { entries: histLocal }
+            });
+          } else {
+            writes.push({
+              type: 'delete',
+              ref: this.db.collection(FB_HISTORIAL_COL).doc(p.id)
+            });
+          }
+        }
+      });
+      // Pacientes que están en cache pero NO en local → eliminados
+      Object.keys(cache).forEach(id => {
+        if (!localIds.has(id)) {
+          writes.push({ type: 'delete', ref: this.db.collection(FB_PATIENTS_COL).doc(id) });
+          if (histCache[id]) {
+            writes.push({ type: 'delete', ref: this.db.collection(FB_HISTORIAL_COL).doc(id) });
+          }
+        }
+      });
+
+      // Chequeo de tamaño por paciente individual (cada documento tiene su 1MB)
+      const limiteHardPorDoc = 1040000;
+      let pacientesGrandes = [];
+      writes.forEach(w => {
+        if (w.type === 'set' && w.data) {
+          const sz = new Blob([JSON.stringify(w.data)]).size;
+          if (sz > limiteHardPorDoc) {
+            pacientesGrandes.push({ id: w.ref.id, kb: Math.round(sz/1024) });
+          }
+        }
+      });
+      if (pacientesGrandes.length > 0) {
         if (!this._sizeWarningShown) {
           this._sizeWarningShown = true;
-          alert('⚠ Base cerca del límite de Firestore.\n\n' +
-            ' • Documento principal: ' + kbM + ' KB\n' +
-            ' • Documento de historial: ' + kbH + ' KB\n\n' +
-            'Considera:\n' +
-            ' • Archivar pacientes egresados antiguos\n' +
-            ' • Compactar historial (engrane → Análisis de tamaño)\n' +
-            ' • Exportar un respaldo manual antes de seguir editando');
+          alert('⚠ Hay paciente(s) que individualmente exceden 1 MB:\n\n' +
+                pacientesGrandes.map(p => '  • ' + p.id + ': ' + p.kb + ' KB').join('\n') +
+                '\n\nUsa la herramienta de compactación (engrane → Análisis de tamaño) para reducirlos.');
         }
-        if (mainSize > limiteHard || histSize > limiteHard) {
-          this.setStatus('error', 'Base demasiado grande');
-          throw new Error('Documento excede 1 MB (main=' + kbM + 'KB, hist=' + kbH + 'KB). Imposible subir.');
-        }
+        // No abortamos el push entero — Firestore rechazará solo los grandes, el resto pasa
       }
 
-      State.data.lastWrite = mainPayload.lastWrite;
-      // Marcar ambos snapshots de eco para que no nos vuelvan a procesar
+      State.data.lastWrite = now;
+
+      // Marcar todos los echo para ignorar
       this._ignoreNextMain = true;
-      this._ignoreNextHist = true;
-      // Batch write: ambos documentos suben atómicamente
-      const batch = this.db.batch();
-      batch.set(this.db.doc(FB_DOC_PATH), mainPayload);
-      batch.set(this.db.doc(FB_HISTORIAL_PATH), historialPayload);
-      await batch.commit();
+
+      // Aplicar writes en lotes de 400
+      let writtenCount = 0;
+      for (let i = 0; i < writes.length; i += 400) {
+        const slice = writes.slice(i, i + 400);
+        const batch = this.db.batch();
+        slice.forEach(w => {
+          if (w.type === 'set') batch.set(w.ref, w.data);
+          else if (w.type === 'delete') batch.delete(w.ref);
+        });
+        await batch.commit();
+        writtenCount += slice.length;
+      }
+      // Main doc (siempre)
+      await this.db.doc(FB_DOC_PATH).set(mainPayload);
+
+      if (writtenCount > 0) {
+        console.log('[Sync] Push delta:', writtenCount, 'documento(s) actualizado(s)');
+      }
       this.setStatus('online');
-      this._clearRetry();    // éxito → resetear contador
+      this._clearRetry();
     } catch(e) {
       console.error('Error guardando en la nube:', e);
       this._ignoreNextMain = false;
-      this._ignoreNextHist = false;
       if (!navigator.onLine) {
         this.setStatus('offline');
       } else {
@@ -2669,11 +2800,14 @@ const Sync = {
     if (this.saveTimeout) { clearTimeout(this.saveTimeout); this.saveTimeout = null; }
     this._clearRetry();
     this.app = null; this.db = null;
-    this.hasReceivedSnapshot = false;  // resetear gate al reconectar
+    this.hasReceivedSnapshot = false;
     this._mainSnap = null;
-    this._histSnap = null;
+    this._patientsCache = {};
+    this._historialCache = {};
+    this._initialPatientsLoaded = false;
+    this._initialHistorialLoaded = false;
+    this._initialMainLoaded = false;
     this._ignoreNextMain = false;
-    this._ignoreNextHist = false;
     this.setStatus('local');
   }
 };
@@ -3740,7 +3874,10 @@ service cloud.firestore {
     match /apps/ortopedia {
       allow read, write: if true;
     }
-    match /apps/ortopedia_historial {
+    match /ortopedia_patients/{id} {
+      allow read, write: if true;
+    }
+    match /ortopedia_historial_v2/{id} {
       allow read, write: if true;
     }
     match /ortopedia_backups/{fecha} {
@@ -3754,7 +3891,10 @@ service cloud.firestore {
     match /apps/ortopedia {
       allow read, write: if true;
     }
-    match /apps/ortopedia_historial {
+    match /ortopedia_patients/{id} {
+      allow read, write: if true;
+    }
+    match /ortopedia_historial_v2/{id} {
       allow read, write: if true;
     }
     match /ortopedia_backups/{fecha} {
