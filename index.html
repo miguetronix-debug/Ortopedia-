@@ -641,7 +641,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.23-backups-multinivel-2026-05-14';
+const APP_VERSION = 'v3.24-fixes-criticos-hardening-2026-05-14';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const BACKUP_HISTORY_KEY = 'ortopedia_backups_v1';   // v3.23: backups locales rotativos
@@ -1565,18 +1565,6 @@ const Backups = {
     };
   },
   // Decide si vale la pena guardar este snapshot — evita ruido por cambios triviales
-  _meritaBackup(prev, curr) {
-    if (!prev) return true;
-    // Cualquier cambio en cantidad de entidades importantes
-    const a = this._resumen(prev), b = this._resumen(curr);
-    if (a.pacientes !== b.pacientes) return true;
-    if (a.pacientesActivos !== b.pacientesActivos) return true;
-    if (a.programas !== b.programas) return true;
-    if (a.egresos !== b.egresos) return true;
-    if (a.icRecibidas !== b.icRecibidas) return true;
-    // Por defecto, también si pasaron >30 min desde el último recent
-    return true;
-  },
   // Guarda un snapshot del estado actual
   guardar(data) {
     if (!data || !data.patients) return;
@@ -2140,11 +2128,11 @@ const Sync = {
             };
             const localStr = JSON.stringify(State.data);
             const newStr = JSON.stringify(newState);
-            // Cantidad de usuarios antes de la migración (para detectar auto-recuperación)
-            const usuariosAntes = (mergedConfig.usuarios||[]).length;
             if (localStr !== newStr) {
               State.data = newState;
-              State._migrar();
+              // v3.24 (H10): NO auto-recuperar usuarios al recibir snapshot —
+              // el dispositivo originante ya lo hizo o lo va a hacer. Evita write-storm.
+              State._migrar({ recoverUsers: false });
               try { localStorage.setItem(STORAGE_KEY, JSON.stringify(State.data)); } catch(e){}
               if (App.render) App.render();
               if (App._currentModalId && State.data.patients.some(p=>p.id===App._currentModalId)) {
@@ -2152,14 +2140,10 @@ const Sync = {
               } else if (App._currentModalId) {
                 App.closeModal();
               }
-            } else {
-              // Aún sin cambio aparente, _migrar pudo haber recuperado usuarios desde firmas
-              State._migrar();
             }
-            const usuariosDespues = (State.data.config.usuarios||[]).length;
-            // Si la fusión recuperó usuarios/catálogos locales, O si _migrar
-            // auto-recuperó usuarios desde firmas, re-publicar.
-            if (needsRepush || usuariosDespues > usuariosAntes) {
+            // Si la fusión recuperó usuarios/catálogos locales (de ANTES del snapshot),
+            // re-publicar para propagarlos.
+            if (needsRepush) {
               this.scheduleSave();
             }
           } else if (snap && !snap.exists) {
@@ -2192,15 +2176,41 @@ const Sync = {
     this.saveTimeout = setTimeout(() => this.pushNow(), 400);
   },
 
+  // v3.24 (C5): retry controlado con un solo timer, backoff exponencial y tope máximo.
+  _retryTimer: null,
+  _retryAttempt: 0,
+  _retryMax: 30,
+  _scheduleRetry() {
+    if (this._retryTimer) clearTimeout(this._retryTimer);
+    this._retryAttempt++;
+    if (this._retryAttempt > this._retryMax) {
+      console.error('[Sync] Máximo de reintentos alcanzado. Esperando intervención manual.');
+      this.setStatus('error', 'Reintentos agotados');
+      if (!this._errorShownThisSession) {
+        this._errorShownThisSession = true;
+        alert('La app no logró conectarse a la nube después de ' + this._retryMax + ' intentos.\n\n' +
+          'Tus cambios están seguros en este dispositivo (y en los respaldos locales).\n' +
+          'Recarga la página (Ctrl+Shift+R) cuando tengas conexión estable.');
+      }
+      return;
+    }
+    // Backoff exponencial con tope de 30s: 1s, 2s, 4s, 8s, 16s, 30s, 30s, ...
+    const delay = Math.min(30000, 1000 * Math.pow(2, this._retryAttempt - 1));
+    this._retryTimer = setTimeout(() => this.pushNow(), delay);
+  },
+  _clearRetry() {
+    if (this._retryTimer) { clearTimeout(this._retryTimer); this._retryTimer = null; }
+    this._retryAttempt = 0;
+  },
+
   async pushNow() {
     if (!this.db) return;
     // v3.23: gate de protección. NUNCA pushear antes de haber recibido al menos
     // un snapshot desde Firebase. Esto previene que un dispositivo recién abierto con
     // localStorage vacío sobrescriba la base remota con un estado vacío.
     if (!this.hasReceivedSnapshot) {
-      console.warn('[Sync] Push bloqueado: aún no se ha recibido el primer snapshot');
-      // Reintentar en 1 segundo
-      setTimeout(() => this.pushNow(), 1000);
+      console.warn('[Sync] Push bloqueado: aún no se ha recibido el primer snapshot. Reintento programado.');
+      this._scheduleRetry();
       return;
     }
     try {
@@ -2214,9 +2224,29 @@ const Sync = {
         config: State.data.config || {},
         lastWrite: Date.now()
       };
+      // v3.24 (C4 parcial): chequeo de tamaño preventivo (Firestore tope 1 MB).
+      const tamano = new Blob([JSON.stringify(payload)]).size;
+      if (tamano > 950000) {
+        const kb = Math.round(tamano / 1024);
+        if (!this._sizeWarningShown) {
+          this._sizeWarningShown = true;
+          alert('⚠ La base de datos pesa ' + kb + ' KB, muy cerca del límite de Firestore (1024 KB).\n\n' +
+            'Considera:\n' +
+            ' • Archivar pacientes egresados antiguos (engrane → Archivado)\n' +
+            ' • Hacer un respaldo manual antes de seguir editando\n\n' +
+            'Si excede el límite, los cambios dejarán de subir a la nube.');
+        }
+        if (tamano > 1040000) {
+          // Excede el límite duro — abortar para no perder los datos
+          this.ignoreNextRemote = false;
+          this.setStatus('error', 'Base demasiado grande');
+          throw new Error('Documento excede 1 MB (' + kb + ' KB). Imposible subir.');
+        }
+      }
       State.data.lastWrite = payload.lastWrite;
       await ref.set(payload);
       this.setStatus('online');
+      this._clearRetry();    // éxito → resetear contador
     } catch(e) {
       console.error('Error guardando en la nube:', e);
       this.ignoreNextRemote = false;
@@ -2233,11 +2263,15 @@ const Sync = {
             'Si esto ocurre seguido, exporta un respaldo desde el botón "Exportar".');
         }
       }
+      // Programar retry si todavía hay esperanza (online, dentro del max)
+      if (navigator.onLine) this._scheduleRetry();
     }
   },
 
   disconnect() {
     if (this.unsubscribe) { try { this.unsubscribe(); } catch(e){} this.unsubscribe = null; }
+    if (this.saveTimeout) { clearTimeout(this.saveTimeout); this.saveTimeout = null; }
+    this._clearRetry();
     this.app = null; this.db = null;
     this.hasReceivedSnapshot = false;  // resetear gate al reconectar
     this.setStatus('local');
@@ -2266,8 +2300,13 @@ const State = {
     if (!this.data.interconsultasEntrantes) this.data.interconsultasEntrantes = [];
     this._migrar();
   },
-  // Migrar datos antiguos al nuevo formato y sembrar catálogos si faltan
-  _migrar() {
+  // Migrar datos antiguos al nuevo formato y sembrar catálogos si faltan.
+  // v3.24 (H10): el parámetro opts.recoverUsers controla si se hace auto-recuperación de usuarios
+  // desde firmas (solo conviene en la carga inicial e imports — NO en cada snapshot recibido,
+  // para evitar write-storms donde 5 dispositivos publican lo mismo simultáneamente).
+  _migrar(opts) {
+    opts = opts || {};
+    const recoverUsers = (opts.recoverUsers !== false);
     const data = this.data;
 
     // Asegurar config y catálogos. Esto corre tanto al cargar como cuando
@@ -2305,22 +2344,33 @@ const State = {
     if (data.config.archivoMesesAntiguedad === undefined) data.config.archivoMesesAntiguedad = 6;
 
     // v3.22: Auto-recuperar usuarios desde las firmas de los datos.
-    // Si un nombre aparece como creadoPor / historial.usuario / evolucion.autor pero
-    // no está en config.usuarios, se agrega automáticamente con rol 'residente'.
-    // Esto resuelve el caso de personas que firmaron acciones sin estar formalmente
-    // registradas, o cuya entrada fue sobrescrita por otro dispositivo antes de v3.21.
-    (function autoRecuperarUsuarios() {
-      const ignorar = new Set(['', '(sin identificar)', 'sin identificar', null, undefined]);
-      const yaCentral = new Set((data.config.usuarios||[]).map(u => (u.nombre||'').toLowerCase().trim()));
-      const candidatos = new Map();   // nombreLower -> nombreOriginal (primera ocurrencia conservada)
+    // v3.24 (H5): normalizar para evitar duplicados por variantes ("Dr. Juan" vs "Dr Juan" vs "Juan").
+    // v3.24 (H10): solo correr si recoverUsers es true (no en cada snapshot — evita write-storm).
+    if (recoverUsers) (function autoRecuperarUsuarios() {
+      const ignorar = new Set(['', '(sin identificar)', 'sin identificar']);
+      // Normalizar: minúsculas, sin diacríticos, sin prefijos (Dr/Dra/Lic/Sr/Sra), un solo espacio
+      const normalizar = (s) => {
+        if (!s || typeof s !== 'string') return '';
+        let n = s.trim().toLowerCase();
+        // Quitar diacríticos: NFD descompone, regex saca combining marks
+        n = n.normalize('NFD').replace(/[̀-ͯ]/g, '');
+        // Quitar prefijos comunes al inicio
+        n = n.replace(/^(dr\.?|dra\.?|doctor|doctora|lic\.?|sr\.?|sra\.?|tec\.?|t\.?n\.?|t\.?o\.?|enfermera|enfermero)\s+/i, '');
+        // Colapsar espacios
+        n = n.replace(/\s+/g, ' ').trim();
+        return n;
+      };
+      const yaCentral = new Set((data.config.usuarios||[]).map(u => normalizar(u.nombre)));
+      const candidatos = new Map();   // claveNormalizada -> nombreOriginal (primera ocurrencia)
       const considerar = (nombre) => {
         if (!nombre || typeof nombre !== 'string') return;
         const limpio = nombre.trim();
         if (!limpio) return;
-        const lower = limpio.toLowerCase();
-        if (ignorar.has(lower)) return;
-        if (yaCentral.has(lower)) return;
-        if (!candidatos.has(lower)) candidatos.set(lower, limpio);
+        if (ignorar.has(limpio.toLowerCase())) return;
+        const clave = normalizar(limpio);
+        if (!clave) return;
+        if (yaCentral.has(clave)) return;
+        if (!candidatos.has(clave)) candidatos.set(clave, limpio);
       };
       (data.patients||[]).forEach(p => {
         considerar(p.creadoPor);
@@ -2662,9 +2712,22 @@ function calcularAlertasPaciente(p) {
 /* ---------- Historial ---------- */
 function logCambio(p, accion, detalle='') {
   if (!p.historial) p.historial = [];
+  const usuario = getCurrentUser() || '(sin identificar)';
+  // v3.24 (H1): coalescer entradas consecutivas del mismo (usuario, accion) en ventana de 5 min.
+  // Esto evita que cada keystroke genere su propia entrada (ej. al teclear el nombre de un paciente
+  // letra por letra). La entrada existente se actualiza con el detalle más reciente y la nueva fecha.
+  const ultimo = p.historial.length > 0 ? p.historial[p.historial.length-1] : null;
+  if (ultimo &&
+      ultimo.usuario === usuario &&
+      ultimo.accion === accion &&
+      Date.now() - new Date(ultimo.fecha).getTime() < 5 * 60 * 1000) {
+    ultimo.fecha = new Date().toISOString();
+    ultimo.detalle = detalle;
+    return;
+  }
   p.historial.push({
     fecha: new Date().toISOString(),
-    usuario: getCurrentUser() || '(sin identificar)',
+    usuario,
     accion,
     detalle
   });
@@ -3004,10 +3067,10 @@ const App = {
                   const r = entry.resumen || {};
                   return `<div class="card compact" style="margin-bottom:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                     <div style="flex:1;min-width:200px;font-size:.85rem">
-                      <strong>${t.toLocaleString('es')}</strong>
+                      <strong>${escapeHtml(t.toLocaleString('es'))}</strong>
                       <div class="muted" style="font-size:.78rem">${r.pacientesActivos||0} activos · ${r.pacientes||0} totales · ${r.programas||0} programas · ${r.egresos||0} egresos · ${r.usuarios||0} usuarios · ${entry.tamanoKB||0} KB</div>
                     </div>
-                    <button class="btn small" onclick="App.restaurarBackupLocal('${entry.timestamp}','${tipo}')">Restaurar</button>
+                    <button class="btn small" data-ts="${escapeHtml(entry.timestamp)}" data-tipo="${escapeHtml(tipo)}" onclick="App._handleRestaurarLocal(this)">Restaurar</button>
                   </div>`;
                 };
                 let html = '';
@@ -8619,11 +8682,17 @@ service cloud.firestore {
     reader.onload = e => {
       try {
         const obj = JSON.parse(e.target.result);
-        if (!obj.patients) throw new Error('Formato no válido');
+        if (!obj || typeof obj !== 'object') throw new Error('Formato no válido');
+        if (!Array.isArray(obj.patients)) throw new Error('El archivo no contiene una lista válida de pacientes');
         if (!confirm(`Importar ${obj.patients.length} paciente(s)? Se reemplazarán los datos actuales.`)) return;
+        // v3.24 (C2): hacer respaldo defensivo antes de sobrescribir, y migrar el dato nuevo
+        try { Backups.guardar(State.data); } catch(e){}
         State.data = obj;
+        // v3.24 (C2): completar campos faltantes y migrar a la versión actual
+        State._migrar();
         State.save();
         this.render();
+        alert('Importación completada. ' + obj.patients.length + ' paciente(s) cargado(s).');
       } catch(err) {
         alert('Error al importar: ' + err.message);
       }
@@ -8661,9 +8730,19 @@ service cloud.firestore {
           <strong>${escapeHtml(b.fecha)}</strong> · ${escapeHtml(t)}
           <div class="muted" style="font-size:.78rem">${r.pacientesActivos||0} activos · ${r.pacientes||0} totales · ${r.programas||0} programas · ${r.egresos||0} egresos · ${r.usuarios||0} usuarios${b.creadoPor?' · creado por '+escapeHtml(b.creadoPor):''}</div>
         </div>
-        <button class="btn small" onclick="App.restaurarBackupNube('${b.fecha}')">Restaurar</button>
+        <button class="btn small" data-cloud-fecha="${escapeHtml(b.fecha)}" onclick="App._handleRestaurarNube(this)">Restaurar</button>
       </div>`;
     }).join('');
+  },
+
+  // v3.24 (C7): handler con data-attribute (evita inyección por nombre/fecha)
+  _handleRestaurarNube(btn) {
+    const fecha = btn.dataset.cloudFecha;
+    if (!fecha || !/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+      alert('Fecha de respaldo inválida.');
+      return;
+    }
+    return this.restaurarBackupNube(fecha);
   },
 
   async restaurarBackupNube(fecha) {
@@ -8692,6 +8771,7 @@ service cloud.firestore {
     // Snapshot local defensivo
     Backups.guardar(State.data);
     State.data = restaurado;
+    State._migrar();   // v3.24 (C2): migrar shape al actual (puede ser un respaldo viejo)
     State.save();
     this.closeModal();
     this.render();
@@ -8748,18 +8828,42 @@ service cloud.firestore {
         cont.innerHTML = '<em class="muted" style="font-size:.85rem">No hay respaldos en tu carpeta de Drive.</em>';
         return;
       }
-      cont.innerHTML = files.map(f => `
-        <div class="card compact" style="margin-bottom:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <div style="flex:1;min-width:200px;font-size:.85rem">
-            <strong>${escapeHtml(f.name)}</strong>
-            <div class="muted" style="font-size:.78rem">${new Date(f.modifiedTime).toLocaleString('es')} · ${Math.round((f.size||0)/1024)} KB</div>
+      // v3.24 (C7): guardar lista en cache y renderizar usando data attributes,
+      // sin meter nombres/ids dentro de strings de JS (evita XSS por nombre malicioso).
+      this._driveFilesCache = {};
+      cont.innerHTML = files.map(f => {
+        this._driveFilesCache[f.id] = { name: f.name };
+        return `
+          <div class="card compact" style="margin-bottom:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <div style="flex:1;min-width:200px;font-size:.85rem">
+              <strong>${escapeHtml(f.name)}</strong>
+              <div class="muted" style="font-size:.78rem">${escapeHtml(new Date(f.modifiedTime).toLocaleString('es'))} · ${Math.round((f.size||0)/1024)} KB</div>
+            </div>
+            <button class="btn small" data-drive-id="${escapeHtml(f.id)}" onclick="App._handleRestaurarDrive(this)">Restaurar</button>
           </div>
-          <button class="btn small" onclick="App.restaurarBackupDrive('${f.id}','${escapeHtml(f.name)}')">Restaurar</button>
-        </div>
-      `).join('');
+        `;
+      }).join('');
     } catch(e) {
       cont.innerHTML = '<em class="muted" style="color:#dc2626">Error: ' + escapeHtml(e.message||'') + '</em>';
     }
+  },
+
+  _handleRestaurarDrive(btn) {
+    const fileId = btn.dataset.driveId;
+    const meta = (this._driveFilesCache || {})[fileId];
+    if (!fileId || !meta) { alert('No se pudo identificar el archivo.'); return; }
+    return this.restaurarBackupDrive(fileId, meta.name);
+  },
+
+  // v3.24 (C7): handler con data-attributes
+  _handleRestaurarLocal(btn) {
+    const ts = btn.dataset.ts;
+    const tipo = btn.dataset.tipo;
+    if (!ts || (tipo !== 'recent' && tipo !== 'daily')) {
+      alert('Respaldo inválido.');
+      return;
+    }
+    return this.restaurarBackupLocal(ts, tipo);
   },
 
   async restaurarBackupDrive(fileId, nombre) {
@@ -8767,11 +8871,12 @@ service cloud.firestore {
     try {
       const wrap = await DriveBackup.descargar(fileId);
       if (!wrap) { alert('No se pudo descargar el archivo.'); return; }
-      // El archivo puede tener formato {appVersion, data: {...}} (nuevo) o ser el dato directo (legacy/export manual)
-      const restaurado = wrap.data || wrap;
-      if (!restaurado.patients) { alert('Archivo no contiene datos válidos.'); return; }
+      // El archivo nuevo trae {appVersion, data:{...}}. Detectar por presencia explícita de appVersion.
+      const restaurado = (wrap.appVersion && wrap.data) ? wrap.data : wrap;
+      if (!restaurado || !Array.isArray(restaurado.patients)) { alert('Archivo no contiene datos válidos.'); return; }
       Backups.guardar(State.data);
       State.data = restaurado;
+      State._migrar();   // v3.24 (C2): migrar shape al actual
       State.save();
       this.closeModal();
       this.render();
@@ -8807,6 +8912,7 @@ service cloud.firestore {
     // Snapshot defensivo de los datos actuales antes de sobrescribir
     Backups.guardar(State.data);
     State.data = restaurado;
+    State._migrar();   // v3.24 (C2): migrar shape al actual
     State.save();
     this.closeModal();
     this.render();
