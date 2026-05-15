@@ -641,7 +641,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.24-fixes-criticos-hardening-2026-05-14';
+const APP_VERSION = 'v3.25-proteccion-edicion-2026-05-14';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const BACKUP_HISTORY_KEY = 'ortopedia_backups_v1';   // v3.23: backups locales rotativos
@@ -2118,8 +2118,42 @@ const Sync = {
             // si es así, hay que volver a subir el documento para no perder esos items.
             const needsRepush = Sync._configDiffersFromRemote(mergedConfig, remoteCfg);
 
+            // v3.25 (C3): proteger pacientes editados localmente reciente o abiertos en modal.
+            // Su versión local se preserva; cualquier cambio remoto para ellos queda diferido
+            // hasta que el usuario cierre el modal o pase la ventana de "dirty".
+            if (App._cleanupDirty) App._cleanupDirty();
+            const localPatientsById = {};
+            (State.data.patients || []).forEach(p => { localPatientsById[p.id] = p; });
+            const remotePatientsById = {};
+            (remote.patients || []).forEach(p => { remotePatientsById[p.id] = p; });
+            let pacientesProtegidos = 0;
+            let diferidos = [];
+            const newPatients = (remote.patients || []).map(rp => {
+              if (App._isPatientDirty && App._isPatientDirty(rp.id)) {
+                const local = localPatientsById[rp.id];
+                if (local) {
+                  pacientesProtegidos++;
+                  // Si el remoto difiere del local, guardar la versión remota como pendiente
+                  if (JSON.stringify(local) !== JSON.stringify(rp)) {
+                    if (App._pendingRemoteRefresh) App._pendingRemoteRefresh[rp.id] = rp;
+                    diferidos.push(rp.id);
+                  }
+                  return local;   // preservar versión local
+                }
+              }
+              return rp;
+            });
+            // Pacientes locales que NO están en remoto y son dirty: preservarlos también
+            // (probablemente recién creados localmente)
+            (State.data.patients || []).forEach(local => {
+              if (!remotePatientsById[local.id] && App._isPatientDirty && App._isPatientDirty(local.id)) {
+                newPatients.push(local);
+                pacientesProtegidos++;
+              }
+            });
+
             const newState = {
-              patients: remote.patients,
+              patients: newPatients,
               programas: remote.programas || [],
               egresos: remote.egresos || [],
               interconsultasEntrantes: remote.interconsultasEntrantes || [],
@@ -2135,12 +2169,27 @@ const Sync = {
               State._migrar({ recoverUsers: false });
               try { localStorage.setItem(STORAGE_KEY, JSON.stringify(State.data)); } catch(e){}
               if (App.render) App.render();
+              // v3.25 (C3): si hay un paciente dirty con cambios remotos diferidos,
+              // mostrar banner sutil en el modal pero NO re-renderizar (no interrumpir edición).
               if (App._currentModalId && State.data.patients.some(p=>p.id===App._currentModalId)) {
-                App.renderModal(App._currentModalId);
+                const tieneDiferidos = diferidos.includes(App._currentModalId);
+                if (tieneDiferidos) {
+                  if (App._showDeferredBanner) App._showDeferredBanner(App._currentModalId);
+                } else {
+                  // El paciente abierto no fue tocado por el snapshot (o no era dirty) → re-render normal
+                  if (!App._isPatientDirty(App._currentModalId, 1500)) {
+                    App.renderModal(App._currentModalId);
+                  }
+                }
               } else if (App._currentModalId) {
                 App.closeModal();
               }
             }
+            // NOTA (C3): NO se hace scheduleSave por pacientesProtegidos. La versión local
+            // del paciente dirty se conserva por ahora; cuando el usuario haga su próxima
+            // edición, State.save() naturalmente disparará el push. Esto deja una ventana
+            // donde cambios remotos para pacientes dirty pueden perderse en el siguiente push,
+            // pero es el trade-off necesario para no interrumpir la edición.
             // Si la fusión recuperó usuarios/catálogos locales (de ANTES del snapshot),
             // re-publicar para propagarlos.
             if (needsRepush) {
@@ -2740,6 +2789,70 @@ function logCambio(p, accion, detalle='') {
    ========================================================= */
 const App = {
   _currentModalId: null,
+
+  // v3.25 (C3): Tracking de pacientes editados localmente recientemente.
+  // Cuando llega un snapshot remoto, los pacientes en este map conservan su versión local
+  // (porque el usuario probablemente está editando o acaba de editar).
+  _dirtyPatients: {},        // {patientId: timestampMs}
+  _pendingRemoteRefresh: {}, // {patientId: snapshotPatientObj} — cambios remotos diferidos
+  _markPatientDirty(id) {
+    if (!id) return;
+    this._dirtyPatients[id] = Date.now();
+  },
+  _isPatientDirty(id, windowMs = 15000) {
+    if (!id) return false;
+    // El paciente abierto en modal SIEMPRE se considera dirty (usuario está mirándolo/editándolo)
+    if (this._currentModalId === id) return true;
+    const t = this._dirtyPatients[id];
+    return !!t && (Date.now() - t < windowMs);
+  },
+  _cleanupDirty() {
+    const now = Date.now();
+    for (const id in this._dirtyPatients) {
+      if (now - this._dirtyPatients[id] > 60000) delete this._dirtyPatients[id];
+    }
+  },
+
+  // v3.25 (C3): mostrar banner sutil cuando hay cambios remotos diferidos para el paciente abierto
+  _showDeferredBanner(patientId) {
+    const modal = document.querySelector('#modalRoot .modal-body');
+    if (!modal) return;
+    // Si ya hay un banner, no duplicar
+    if (modal.querySelector('.deferred-banner')) return;
+    const banner = document.createElement('div');
+    banner.className = 'alert-box yellow deferred-banner';
+    banner.style.cssText = 'margin-bottom:10px;position:sticky;top:0;z-index:5;cursor:default';
+    banner.innerHTML =
+      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+        '<span style="flex:1">🔔 <strong>Otro dispositivo actualizó este paciente.</strong> Tus cambios locales están a salvo. ¿Aplicar los del equipo?</span>' +
+        '<button class="btn small" onclick="App._aplicarCambiosDiferidos(\'' + patientId + '\')">Aplicar</button>' +
+        '<button class="btn ghost small" onclick="App._descartarCambiosDiferidos(\'' + patientId + '\')">Descartar</button>' +
+      '</div>';
+    modal.insertBefore(banner, modal.firstChild);
+  },
+
+  _aplicarCambiosDiferidos(patientId) {
+    const remoto = this._pendingRemoteRefresh[patientId];
+    if (!remoto) {
+      this._descartarCambiosDiferidos(patientId);
+      return;
+    }
+    // Reemplazar el paciente con la versión remota (descarta cambios locales no pusheados)
+    const idx = State.data.patients.findIndex(p => p.id === patientId);
+    if (idx >= 0) {
+      State.data.patients[idx] = remoto;
+      delete this._dirtyPatients[patientId];   // ya no está sucio
+      delete this._pendingRemoteRefresh[patientId];
+      State.save();
+      this.renderModal(patientId);
+    }
+  },
+
+  _descartarCambiosDiferidos(patientId) {
+    delete this._pendingRemoteRefresh[patientId];
+    const banner = document.querySelector('#modalRoot .deferred-banner');
+    if (banner) banner.remove();
+  },
 
   async init() {
     // Mostrar versión visible
@@ -7021,8 +7134,18 @@ service cloud.firestore {
   },
 
   closeModal() {
+    const idCerrando = this._currentModalId;
     this._currentModalId = null;
     document.getElementById('modalRoot').innerHTML = '';
+    // v3.25 (C3): al cerrar el modal, si había cambios remotos diferidos sin decidir,
+    // se conservan los cambios locales (el usuario los hizo conscientemente).
+    // La próxima sincronización propagará la versión local al resto del equipo,
+    // y los cambios del otro dispositivo se pueden re-aplicar manualmente si se necesita.
+    if (idCerrando) {
+      delete this._pendingRemoteRefresh[idCerrando];
+      // Dejar el dirty marker activo unos segundos más para que el siguiente snapshot
+      // tampoco interfiera mientras la versión local se sube
+    }
     this.render();
   },
 
@@ -8226,6 +8349,7 @@ service cloud.firestore {
       logCambio(p, 'Edición', `${campo}: ${valor}`);
     }
     p[campo] = valor;
+    this._markPatientDirty(id);   // v3.25 (C3): proteger contra overwrite por snapshot
     State.save();
     // No re-render del modal completo para no perder foco; sólo refresca header sutilmente
     this._refreshHeader(id);
