@@ -641,7 +641,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.30-sharding-total-2026-05-14';
+const APP_VERSION = 'v3.31-analizador-sharded-2026-05-15';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const BACKUP_HISTORY_KEY = 'ortopedia_backups_v1';   // v3.23: backups locales rotativos
@@ -9509,27 +9509,76 @@ service cloud.firestore {
     this.refreshCloudBackups();
   },
 
-  /* ---------- Analizador de tamaño (v3.28) ---------- */
+  /* ---------- Analizador de tamaño (v3.28 + actualizado v3.30 para sharding) ---------- */
   analizarTamano() {
     const a = SizeAnalyzer.analizar();
     const cont = document.getElementById('sizeAnalysisBlock');
     if (!cont) return;
     const kb = (b) => (b/1024).toFixed(1) + ' KB';
     const pct = (b, total) => total > 0 ? ((b/total)*100).toFixed(1) + '%' : '0%';
-    const limite = 1048576;
-    const pctLimite = ((a.totalBytes/limite)*100).toFixed(1);
-    const color = a.totalBytes > 950000 ? '#dc2626' : (a.totalBytes > 800000 ? '#92400e' : '#059669');
+    const limitePorDoc = 1048576;   // 1 MB por documento Firestore
+
+    // v3.30: con sharding, lo que realmente cuenta es:
+    //   - El main doc (programas + egresos + IC + config) — sin pacientes
+    //   - Cada paciente individual como documento separado
+    //   - Cada historial separado
+    const mainDocBytes = a.programasBytes + a.egresosBytes + a.icBytes + a.configBytes + 200; // overhead estimado
+    const maxPaciente = a.pacientes[0] || { totalBytes: 0, nombre: '', cama: '', historialBytes: 0 };
+    // Tamaño de paciente "core" = total menos historial (porque historial va a doc aparte en v3.30)
+    const maxPacienteCoreBytes = (maxPaciente.totalBytes || 0) - (maxPaciente.historialBytes || 0);
+    const maxHistorial = a.pacientes.slice().sort((x,y) => (y.historialBytes||0) - (x.historialBytes||0))[0] || { historialBytes: 0, nombre: '', cama: '' };
+
+    const colorMain = mainDocBytes > 950000 ? '#dc2626' : (mainDocBytes > 800000 ? '#92400e' : '#059669');
+    const colorPac  = maxPacienteCoreBytes > 950000 ? '#dc2626' : (maxPacienteCoreBytes > 500000 ? '#92400e' : '#059669');
+    const colorHis  = (maxHistorial.historialBytes||0) > 950000 ? '#dc2626' : ((maxHistorial.historialBytes||0) > 500000 ? '#92400e' : '#059669');
 
     let html = '<div style="border:1px solid #cbd5e1;padding:10px;border-radius:6px;margin-top:8px">';
-    html += '<div style="font-size:1rem;font-weight:600;color:' + color + '">' +
-            'Tamaño total: ' + kb(a.totalBytes) + ' (' + pctLimite + '% del límite de Firestore)' +
+
+    // Mensaje contextual sobre el modelo
+    html += '<div class="alert-box blue" style="margin-bottom:10px;font-size:.85rem">' +
+            '<strong>Modelo de almacenamiento (v3.30):</strong> los pacientes están sharded — cada uno vive en su propio ' +
+            'documento de Firestore (límite de 1 MB <em>por documento</em>, no del total). Lo que importa monitorear es:' +
             '</div>';
-    html += '<div style="margin-top:8px;font-size:.85rem">';
-    html += '<div><strong>Pacientes:</strong> ' + kb(a.patientsBytes) + ' (' + pct(a.patientsBytes, a.totalBytes) + ') · ' + a.patientCount + ' pacientes</div>';
-    html += '<div><strong>Programas:</strong> ' + kb(a.programasBytes) + ' (' + pct(a.programasBytes, a.totalBytes) + ')</div>';
-    html += '<div><strong>Egresos:</strong> ' + kb(a.egresosBytes) + ' (' + pct(a.egresosBytes, a.totalBytes) + ')</div>';
-    html += '<div><strong>IC Recibidas:</strong> ' + kb(a.icBytes) + ' (' + pct(a.icBytes, a.totalBytes) + ')</div>';
-    html += '<div><strong>Configuración / catálogos:</strong> ' + kb(a.configBytes) + ' (' + pct(a.configBytes, a.totalBytes) + ')</div>';
+
+    // 1. Main doc (lo único que crece en serio si el equipo es muy activo)
+    html += '<div style="margin-bottom:10px">';
+    html += '<div style="font-weight:600;color:' + colorMain + '">' +
+            '📄 Documento principal: ' + kb(mainDocBytes) + ' de 1024 KB (' + ((mainDocBytes/limitePorDoc)*100).toFixed(1) + '%)' +
+            '</div>';
+    html += '<div style="font-size:.78rem;margin-left:18px;color:#64748b">' +
+            'Contiene: programas (' + kb(a.programasBytes) + '), egresos (' + kb(a.egresosBytes) + '), ' +
+            'IC recibidas (' + kb(a.icBytes) + '), config/catálogos (' + kb(a.configBytes) + ')' +
+            '</div>';
+    html += '</div>';
+
+    // 2. Paciente más pesado (individual)
+    html += '<div style="margin-bottom:10px">';
+    html += '<div style="font-weight:600;color:' + colorPac + '">' +
+            '👤 Paciente más pesado: ' + kb(maxPacienteCoreBytes) + ' de 1024 KB (' + ((maxPacienteCoreBytes/limitePorDoc)*100).toFixed(1) + '%)' +
+            '</div>';
+    html += '<div style="font-size:.78rem;margin-left:18px;color:#64748b">' +
+            escapeHtml(maxPaciente.nombre || '(sin nombre)') + (maxPaciente.cama ? ' (cama ' + escapeHtml(maxPaciente.cama) + ')' : '') +
+            '</div>';
+    html += '</div>';
+
+    // 3. Historial más pesado
+    html += '<div style="margin-bottom:10px">';
+    html += '<div style="font-weight:600;color:' + colorHis + '">' +
+            '📜 Historial más pesado: ' + kb(maxHistorial.historialBytes||0) + ' de 1024 KB (' + (((maxHistorial.historialBytes||0)/limitePorDoc)*100).toFixed(1) + '%)' +
+            '</div>';
+    html += '<div style="font-size:.78rem;margin-left:18px;color:#64748b">' +
+            escapeHtml(maxHistorial.nombre || '(sin nombre)') + (maxHistorial.cama ? ' (cama ' + escapeHtml(maxHistorial.cama) + ')' : '') +
+            ' · ' + (maxHistorial.historialCount || 0) + ' entradas' +
+            '</div>';
+    html += '</div>';
+
+    // 4. Resumen y capacidad efectiva
+    html += '<hr style="margin:10px 0;border:none;border-top:1px solid #e2e8f0">';
+    html += '<div style="font-size:.85rem">';
+    html += '<div><strong>📊 Total en memoria:</strong> ' + kb(a.totalBytes) + ' (todos los pacientes + datos)</div>';
+    html += '<div><strong>🗄 Pacientes:</strong> ' + a.patientCount + ' documentos independientes en Firestore</div>';
+    html += '<div><strong>♾ Capacidad efectiva:</strong> ' + a.patientCount + ' × 1 MB = ' + a.patientCount + ' MB para pacientes ' +
+            '<span style="color:#64748b">(prácticamente ilimitada)</span></div>';
     html += '</div>';
 
     // Top 10 pacientes más pesados
