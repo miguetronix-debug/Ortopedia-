@@ -19,6 +19,8 @@
 <!-- Firebase SDK (versión compat — más estable en Safari/iOS) -->
 <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js"></script>
+<!-- v3.23: Google Identity Services para OAuth de Google Drive (carga diferida) -->
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   /* ---------- Reset & base ---------- */
   :root {
@@ -639,10 +641,18 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.22-auto-recuperar-usuarios-2026-05-14';
+const APP_VERSION = 'v3.23-backups-multinivel-2026-05-14';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
+const BACKUP_HISTORY_KEY = 'ortopedia_backups_v1';   // v3.23: backups locales rotativos
+const BACKUP_MAX_RECENT = 10;                          // últimos 10 cambios significativos
+const BACKUP_MAX_DAILY = 7;                            // últimos 7 días
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
+const FB_BACKUP_COL = 'ortopedia_backups';   // v3.23: colección de respaldos diarios
+const CLOUD_BACKUP_MAX_DAYS = 30;             // Mantener últimos N días en Firebase
+const DRIVE_OAUTH_KEY = 'ortopedia_drive_oauth_v1';   // v3.23: token OAuth de Google Drive
+const DRIVE_CLIENT_ID_KEY = 'ortopedia_drive_client_id_v1';  // Client ID configurado por el usuario
+const DRIVE_FOLDER_NAME = 'Ortopedia_Backups';
 const CURRENT_USER_KEY = 'ortopedia_user_v1';   // nombre de quien usa este dispositivo
 const LAST_EXPORT_KEY = 'ortopedia_last_export_v1';
 const DEBOUNCE_MS = 1500;  // milisegundos para evitar doble click en botones críticos
@@ -1516,6 +1526,433 @@ function debounceAction(key, fn) {
   return true;
 }
 
+/* ---------- Backups locales rotativos (v3.23) ----------
+   Mantiene una bitácora versionada de la base en localStorage para poder restaurar
+   ante pérdida súbita. Dos series independientes:
+     - "recent": últimos N snapshots cada vez que el dataset cambia significativamente
+     - "daily":  un snapshot por día (el primero del día), últimos M días
+   Se almacenan los datos serializados, con timestamp y métricas para mostrar al usuario.
+*/
+const Backups = {
+  _read() {
+    try {
+      const raw = localStorage.getItem(BACKUP_HISTORY_KEY);
+      if (!raw) return { recent: [], daily: [] };
+      const obj = JSON.parse(raw);
+      return { recent: obj.recent || [], daily: obj.daily || [] };
+    } catch(e) { return { recent: [], daily: [] }; }
+  },
+  _write(history) {
+    try { localStorage.setItem(BACKUP_HISTORY_KEY, JSON.stringify(history)); }
+    catch(e) {
+      console.warn('No se pudo guardar el backup local:', e);
+      // localStorage lleno — reducir cantidad
+      if (history.recent.length > 3) {
+        history.recent = history.recent.slice(0, 3);
+        try { localStorage.setItem(BACKUP_HISTORY_KEY, JSON.stringify(history)); }
+        catch(e2) { console.error('Backup local imposible:', e2); }
+      }
+    }
+  },
+  _resumen(data) {
+    return {
+      pacientes: (data.patients||[]).length,
+      pacientesActivos: (data.patients||[]).filter(p => !p.fechaEgreso).length,
+      programas: (data.programas||[]).length,
+      egresos: (data.egresos||[]).length,
+      icRecibidas: (data.interconsultasEntrantes||[]).length,
+      usuarios: (data.config && data.config.usuarios ? data.config.usuarios.length : 0)
+    };
+  },
+  // Decide si vale la pena guardar este snapshot — evita ruido por cambios triviales
+  _meritaBackup(prev, curr) {
+    if (!prev) return true;
+    // Cualquier cambio en cantidad de entidades importantes
+    const a = this._resumen(prev), b = this._resumen(curr);
+    if (a.pacientes !== b.pacientes) return true;
+    if (a.pacientesActivos !== b.pacientesActivos) return true;
+    if (a.programas !== b.programas) return true;
+    if (a.egresos !== b.egresos) return true;
+    if (a.icRecibidas !== b.icRecibidas) return true;
+    // Por defecto, también si pasaron >30 min desde el último recent
+    return true;
+  },
+  // Guarda un snapshot del estado actual
+  guardar(data) {
+    if (!data || !data.patients) return;
+    const history = this._read();
+    const ahora = new Date();
+    const ahoraISO = ahora.toISOString();
+    const fechaSolo = ahoraISO.slice(0, 10);   // YYYY-MM-DD
+    const serial = JSON.stringify(data);
+    const entry = {
+      timestamp: ahoraISO,
+      fecha: fechaSolo,
+      tamanoKB: Math.round(serial.length / 1024),
+      resumen: this._resumen(data),
+      data: serial   // guardamos como string para no duplicar parsing
+    };
+    // Solo agregar a recent si el último no es idéntico (evita duplicados consecutivos)
+    const ultimo = history.recent[0];
+    if (!ultimo || ultimo.data !== serial) {
+      history.recent.unshift(entry);
+      if (history.recent.length > BACKUP_MAX_RECENT) {
+        history.recent = history.recent.slice(0, BACKUP_MAX_RECENT);
+      }
+    }
+    // Daily: si no hay backup para hoy, agregarlo
+    const hayHoy = history.daily.some(e => e.fecha === fechaSolo);
+    if (!hayHoy) {
+      history.daily.unshift({ ...entry });
+      if (history.daily.length > BACKUP_MAX_DAILY) {
+        history.daily = history.daily.slice(0, BACKUP_MAX_DAILY);
+      }
+    }
+    this._write(history);
+  },
+  listar() {
+    return this._read();
+  },
+  // Restaurar desde un backup específico (por timestamp + tipo)
+  restaurar(timestamp, tipo) {
+    const history = this._read();
+    const lista = (tipo === 'daily') ? history.daily : history.recent;
+    const entry = lista.find(e => e.timestamp === timestamp);
+    if (!entry) return null;
+    try { return JSON.parse(entry.data); }
+    catch(e) { return null; }
+  },
+  // Limpiar todos los backups locales (último recurso)
+  limpiarTodos() {
+    try { localStorage.removeItem(BACKUP_HISTORY_KEY); } catch(e){}
+  }
+};
+
+/* ---------- Backups diarios en Firebase (v3.23) ----------
+   Una vez al día, guarda un snapshot de la base completa en una colección aparte.
+   Cada documento es un día (YYYY-MM-DD). Mantiene los últimos CLOUD_BACKUP_MAX_DAYS.
+   Si Firebase falla o no está disponible, no rompe nada — los backups locales son la
+   primera línea de defensa.
+*/
+const CloudBackups = {
+  _lastCheckedDay: null,    // Recordar el último día revisado para no consultar Firestore en cada save
+
+  // Verificar si el backup de hoy existe; si no, crearlo. Idempotente.
+  async asegurarBackupDeHoy() {
+    if (!Sync.db || !Sync.hasReceivedSnapshot) return;
+    const data = State.data;
+    if (!data || !data.patients || data.patients.length === 0) return;  // No respaldar vacío
+    const hoy = new Date().toISOString().slice(0, 10);
+    if (this._lastCheckedDay === hoy) return;   // Ya revisamos hoy en esta sesión
+    this._lastCheckedDay = hoy;
+    try {
+      const col = Sync.db.collection(FB_BACKUP_COL);
+      const docRef = col.doc(hoy);
+      const snap = await docRef.get();
+      if (snap.exists) return;   // Ya existe el de hoy
+      const payload = {
+        fecha: hoy,
+        timestamp: Date.now(),
+        creadoPor: getCurrentUser() || '',
+        appVersion: APP_VERSION,
+        resumen: Backups._resumen(data),
+        patients: data.patients || [],
+        programas: data.programas || [],
+        egresos: data.egresos || [],
+        interconsultasEntrantes: data.interconsultasEntrantes || [],
+        config: data.config || {}
+      };
+      await docRef.set(payload);
+      console.log('[CloudBackups] Respaldo diario creado:', hoy);
+      // Limpiar respaldos viejos (no esperamos el resultado para no bloquear UX)
+      this.limpiarAntiguos();
+    } catch(e) {
+      console.warn('[CloudBackups] No se pudo crear respaldo diario:', e.message || e);
+    }
+  },
+
+  async limpiarAntiguos() {
+    if (!Sync.db) return;
+    try {
+      const col = Sync.db.collection(FB_BACKUP_COL);
+      const snap = await col.orderBy('fecha', 'desc').get();
+      const docs = [];
+      snap.forEach(d => docs.push({ id: d.id, fecha: d.data().fecha }));
+      // Eliminar los que sobran después del límite
+      const sobran = docs.slice(CLOUD_BACKUP_MAX_DAYS);
+      for (const d of sobran) {
+        try { await col.doc(d.id).delete(); } catch(e){}
+      }
+    } catch(e) { console.warn('[CloudBackups] Error limpiando antiguos:', e.message || e); }
+  },
+
+  async listar() {
+    if (!Sync.db) return [];
+    try {
+      const col = Sync.db.collection(FB_BACKUP_COL);
+      const snap = await col.orderBy('fecha', 'desc').limit(CLOUD_BACKUP_MAX_DAYS).get();
+      const out = [];
+      snap.forEach(d => {
+        const data = d.data();
+        out.push({
+          id: d.id,
+          fecha: data.fecha,
+          timestamp: data.timestamp,
+          creadoPor: data.creadoPor || '',
+          appVersion: data.appVersion || '',
+          resumen: data.resumen || {}
+        });
+      });
+      return out;
+    } catch(e) {
+      console.warn('[CloudBackups] Error listando:', e.message || e);
+      return [];
+    }
+  },
+
+  async cargar(fecha) {
+    if (!Sync.db) return null;
+    try {
+      const doc = await Sync.db.collection(FB_BACKUP_COL).doc(fecha).get();
+      if (!doc.exists) return null;
+      const d = doc.data();
+      return {
+        patients: d.patients || [],
+        programas: d.programas || [],
+        egresos: d.egresos || [],
+        interconsultasEntrantes: d.interconsultasEntrantes || [],
+        config: d.config || {},
+        lastWrite: d.timestamp
+      };
+    } catch(e) {
+      console.warn('[CloudBackups] Error cargando:', e.message || e);
+      return null;
+    }
+  }
+};
+
+/* ---------- Backups en Google Drive (v3.23) ----------
+   Sube una copia JSON al Google Drive del usuario una vez por día.
+   Requiere:
+     1) Que el usuario haya creado un OAuth Client ID en Google Cloud Console
+     2) Que el usuario haya autorizado a la app (popup de Google)
+   El token se guarda en localStorage. Se renueva cada 1h aprox automáticamente.
+   Usamos scope 'drive.file' que solo permite a la app ver/editar archivos creados por ella misma —
+   más seguro y privado que pedir acceso completo a Drive.
+*/
+const DriveBackup = {
+  _accessToken: null,
+  _tokenExpiresAt: 0,
+  _folderId: null,
+  _lastUploadDay: null,
+
+  getClientId() {
+    return localStorage.getItem(DRIVE_CLIENT_ID_KEY) || '';
+  },
+  setClientId(id) {
+    if (id) localStorage.setItem(DRIVE_CLIENT_ID_KEY, id);
+    else localStorage.removeItem(DRIVE_CLIENT_ID_KEY);
+  },
+
+  isAuthorized() {
+    if (!this._accessToken) {
+      // Intentar restaurar desde localStorage
+      try {
+        const saved = JSON.parse(localStorage.getItem(DRIVE_OAUTH_KEY) || 'null');
+        if (saved && saved.access_token && saved.expires_at > Date.now()) {
+          this._accessToken = saved.access_token;
+          this._tokenExpiresAt = saved.expires_at;
+          this._folderId = saved.folder_id || null;
+        }
+      } catch(e){}
+    }
+    return !!this._accessToken && this._tokenExpiresAt > Date.now();
+  },
+
+  _saveToken() {
+    try {
+      localStorage.setItem(DRIVE_OAUTH_KEY, JSON.stringify({
+        access_token: this._accessToken,
+        expires_at: this._tokenExpiresAt,
+        folder_id: this._folderId
+      }));
+    } catch(e){}
+  },
+
+  // Solicita autorización al usuario (popup de Google)
+  async autorizar() {
+    if (typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) {
+      throw new Error('Google Identity Services no está cargado. Espera unos segundos e intenta de nuevo.');
+    }
+    const clientId = this.getClientId();
+    if (!clientId) {
+      throw new Error('Falta configurar el Client ID de Google. Ver instrucciones en Configuración.');
+    }
+    return new Promise((resolve, reject) => {
+      const tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: clientId,
+        scope: 'https://www.googleapis.com/auth/drive.file',
+        prompt: '',
+        callback: (resp) => {
+          if (resp.error) {
+            reject(new Error('Autorización rechazada: ' + (resp.error_description || resp.error)));
+            return;
+          }
+          this._accessToken = resp.access_token;
+          this._tokenExpiresAt = Date.now() + (resp.expires_in || 3600) * 1000;
+          this._saveToken();
+          resolve(true);
+        }
+      });
+      tokenClient.requestAccessToken();
+    });
+  },
+
+  desautorizar() {
+    if (this._accessToken && typeof google !== 'undefined' && google.accounts && google.accounts.oauth2) {
+      try { google.accounts.oauth2.revoke(this._accessToken, ()=>{}); } catch(e){}
+    }
+    this._accessToken = null;
+    this._tokenExpiresAt = 0;
+    this._folderId = null;
+    try { localStorage.removeItem(DRIVE_OAUTH_KEY); } catch(e){}
+  },
+
+  // Asegura que existe la carpeta Ortopedia_Backups en el Drive del usuario
+  async _asegurarCarpeta() {
+    if (this._folderId) return this._folderId;
+    // Buscar si ya existe
+    const q = encodeURIComponent(`name='${DRIVE_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+    const resp = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`, {
+      headers: { Authorization: 'Bearer ' + this._accessToken }
+    });
+    if (!resp.ok) throw new Error('Error buscando carpeta: ' + resp.status);
+    const data = await resp.json();
+    if (data.files && data.files.length > 0) {
+      this._folderId = data.files[0].id;
+    } else {
+      // Crearla
+      const create = await fetch('https://www.googleapis.com/drive/v3/files', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + this._accessToken,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          name: DRIVE_FOLDER_NAME,
+          mimeType: 'application/vnd.google-apps.folder'
+        })
+      });
+      if (!create.ok) throw new Error('Error creando carpeta: ' + create.status);
+      const createData = await create.json();
+      this._folderId = createData.id;
+    }
+    this._saveToken();
+    return this._folderId;
+  },
+
+  // Sube el JSON del día (idempotente — sobrescribe si ya existe el mismo día)
+  async subirBackupDeHoy() {
+    if (!this.isAuthorized()) return false;
+    const data = State.data;
+    if (!data || !data.patients || data.patients.length === 0) return false;
+    const hoy = new Date().toISOString().slice(0, 10);
+    if (this._lastUploadDay === hoy) return false;   // ya subimos hoy en esta sesión
+    try {
+      const folderId = await this._asegurarCarpeta();
+      const nombre = `ortopedia_${hoy}.json`;
+      // Buscar si ya existe archivo con ese nombre en la carpeta
+      const q = encodeURIComponent(`name='${nombre}' and '${folderId}' in parents and trashed=false`);
+      const search = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`, {
+        headers: { Authorization: 'Bearer ' + this._accessToken }
+      });
+      if (!search.ok) throw new Error('Error buscando archivo: ' + search.status);
+      const searchData = await search.json();
+      const fileId = (searchData.files && searchData.files[0]) ? searchData.files[0].id : null;
+      const contenido = JSON.stringify({
+        appVersion: APP_VERSION,
+        creadoPor: getCurrentUser() || '',
+        timestamp: Date.now(),
+        resumen: Backups._resumen(data),
+        data: data
+      }, null, 2);
+      // Usar Drive upload con multipart para soportar metadatos + contenido
+      const boundary = '-------ortopedia_' + Math.random().toString(36).slice(2);
+      const metadata = fileId
+        ? { name: nombre }   // update no admite parents
+        : { name: nombre, parents: [folderId] };
+      const body =
+        `--${boundary}\r\n` +
+        `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+        JSON.stringify(metadata) + `\r\n` +
+        `--${boundary}\r\n` +
+        `Content-Type: application/json\r\n\r\n` +
+        contenido + `\r\n` +
+        `--${boundary}--`;
+      const url = fileId
+        ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart`
+        : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
+      const upload = await fetch(url, {
+        method: fileId ? 'PATCH' : 'POST',
+        headers: {
+          Authorization: 'Bearer ' + this._accessToken,
+          'Content-Type': 'multipart/related; boundary=' + boundary
+        },
+        body: body
+      });
+      if (!upload.ok) {
+        const txt = await upload.text();
+        throw new Error('Error subiendo a Drive (' + upload.status + '): ' + txt.slice(0, 200));
+      }
+      this._lastUploadDay = hoy;
+      console.log('[DriveBackup] Respaldo subido a Drive:', nombre);
+      return true;
+    } catch(e) {
+      console.warn('[DriveBackup] Error:', e.message || e);
+      // Si el token expiró, limpiarlo
+      if ((e.message||'').includes('401')) {
+        this._accessToken = null;
+        this._tokenExpiresAt = 0;
+        try { localStorage.removeItem(DRIVE_OAUTH_KEY); } catch(e){}
+      }
+      throw e;
+    }
+  },
+
+  // Lista backups en la carpeta de Drive
+  async listar() {
+    if (!this.isAuthorized()) return [];
+    try {
+      const folderId = await this._asegurarCarpeta();
+      const q = encodeURIComponent(`'${folderId}' in parents and trashed=false and mimeType='application/json'`);
+      const resp = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime,size)&orderBy=modifiedTime desc&pageSize=60`, {
+        headers: { Authorization: 'Bearer ' + this._accessToken }
+      });
+      if (!resp.ok) throw new Error('Error listando: ' + resp.status);
+      const data = await resp.json();
+      return data.files || [];
+    } catch(e) {
+      console.warn('[DriveBackup] Error listando:', e.message || e);
+      return [];
+    }
+  },
+
+  async descargar(fileId) {
+    if (!this.isAuthorized()) return null;
+    try {
+      const resp = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+        headers: { Authorization: 'Bearer ' + this._accessToken }
+      });
+      if (!resp.ok) throw new Error('Error descargando: ' + resp.status);
+      const json = await resp.json();
+      return json.data || json;
+    } catch(e) {
+      console.warn('[DriveBackup] Error descargando:', e.message || e);
+      return null;
+    }
+  }
+};
+
 /* ---------- Sincronización en la nube (Firebase Firestore) ---------- */
 const Sync = {
   app: null,
@@ -1524,6 +1961,10 @@ const Sync = {
   status: 'local',          // 'local' | 'connecting' | 'online' | 'offline' | 'error'
   saveTimeout: null,
   ignoreNextRemote: false,  // para evitar loops cuando recibimos eco propio
+  hasReceivedSnapshot: false,  // v3.23: gate de protección — no se puede pushear
+                                 // hasta haber confirmado el contenido remoto al menos una vez.
+                                 // Esto previene que un dispositivo recién abierto con localStorage
+                                 // vacío sobrescriba la base remota con un estado vacío.
 
   getConfig() {
     // 1. Configuración guardada localmente (override manual)
@@ -1664,6 +2105,16 @@ const Sync = {
       this.unsubscribe = ref.onSnapshot(
         (snap) => {
           this.setStatus('online');
+          // v3.23: marcar que ya recibimos un snapshot — desde ahora es seguro pushear.
+          this.hasReceivedSnapshot = true;
+          // v3.23: programar verificación de backup diario (idempotente)
+          setTimeout(() => { try { CloudBackups.asegurarBackupDeHoy(); } catch(e){} }, 3000);
+          // v3.23: subir backup a Google Drive si está autorizado (idempotente, 1 vez por día)
+          setTimeout(() => {
+            try {
+              if (DriveBackup.isAuthorized()) DriveBackup.subirBackupDeHoy();
+            } catch(e){}
+          }, 5000);
           if (this.ignoreNextRemote) {
             this.ignoreNextRemote = false;
             return;
@@ -1743,6 +2194,15 @@ const Sync = {
 
   async pushNow() {
     if (!this.db) return;
+    // v3.23: gate de protección. NUNCA pushear antes de haber recibido al menos
+    // un snapshot desde Firebase. Esto previene que un dispositivo recién abierto con
+    // localStorage vacío sobrescriba la base remota con un estado vacío.
+    if (!this.hasReceivedSnapshot) {
+      console.warn('[Sync] Push bloqueado: aún no se ha recibido el primer snapshot');
+      // Reintentar en 1 segundo
+      setTimeout(() => this.pushNow(), 1000);
+      return;
+    }
     try {
       const ref = this.db.doc(FB_DOC_PATH);
       this.ignoreNextRemote = true;
@@ -1779,6 +2239,7 @@ const Sync = {
   disconnect() {
     if (this.unsubscribe) { try { this.unsubscribe(); } catch(e){} this.unsubscribe = null; }
     this.app = null; this.db = null;
+    this.hasReceivedSnapshot = false;  // resetear gate al reconectar
     this.setStatus('local');
   }
 };
@@ -1956,7 +2417,21 @@ const State = {
   save() {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(this.data)); }
     catch(e) { alert('Error al guardar localmente: ' + e.message); }
+    // v3.23: snapshot local rotativo (debounced) para poder restaurar ante pérdida súbita
+    State._scheduleBackup();
     Sync.scheduleSave();
+  },
+  // Debounce de backups para no escribir localStorage en cada keystroke
+  _backupTimeout: null,
+  _scheduleBackup() {
+    if (State._backupTimeout) clearTimeout(State._backupTimeout);
+    State._backupTimeout = setTimeout(() => {
+      // No guardar backups de datos vacíos (estado inicial sin patients)
+      if ((State.data.patients||[]).length === 0
+          && (State.data.programas||[]).length === 0
+          && (State.data.egresos||[]).length === 0) return;
+      Backups.guardar(State.data);
+    }, 2000);
   }
 };
 
@@ -2511,6 +2986,105 @@ const App = {
             </div>
 
             <div class="setup-step">
+              <h3>Respaldos automáticos (v3.23)</h3>
+              <p class="muted" style="font-size:.85rem">
+                La app mantiene copias automáticas de la base completa en este dispositivo para que puedas
+                restaurar ante una pérdida súbita. Guarda los últimos ${BACKUP_MAX_RECENT} cambios significativos
+                y los últimos ${BACKUP_MAX_DAILY} días.
+              </p>
+              ${(() => {
+                const h = Backups.listar();
+                const totRecent = h.recent.length;
+                const totDaily = h.daily.length;
+                if (totRecent === 0 && totDaily === 0) {
+                  return '<div class="muted" style="font-size:.85rem">Aún no hay respaldos guardados en este dispositivo. Se crearán automáticamente al editar cualquier paciente.</div>';
+                }
+                const render = (entry, tipo) => {
+                  const t = new Date(entry.timestamp);
+                  const r = entry.resumen || {};
+                  return `<div class="card compact" style="margin-bottom:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                    <div style="flex:1;min-width:200px;font-size:.85rem">
+                      <strong>${t.toLocaleString('es')}</strong>
+                      <div class="muted" style="font-size:.78rem">${r.pacientesActivos||0} activos · ${r.pacientes||0} totales · ${r.programas||0} programas · ${r.egresos||0} egresos · ${r.usuarios||0} usuarios · ${entry.tamanoKB||0} KB</div>
+                    </div>
+                    <button class="btn small" onclick="App.restaurarBackupLocal('${entry.timestamp}','${tipo}')">Restaurar</button>
+                  </div>`;
+                };
+                let html = '';
+                if (totDaily > 0) {
+                  html += '<h4 style="margin:10px 0 6px">Diarios (' + totDaily + ')</h4>';
+                  html += h.daily.map(e => render(e, 'daily')).join('');
+                }
+                if (totRecent > 0) {
+                  html += '<h4 style="margin:10px 0 6px">Recientes (' + totRecent + ')</h4>';
+                  html += h.recent.map(e => render(e, 'recent')).join('');
+                }
+                return html;
+              })()}
+              <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+                <button class="btn ghost small" onclick="App.exportData()">⬇ Exportar JSON ahora</button>
+                <button class="btn ghost small" onclick="App.crearBackupManual()">📸 Crear respaldo manual</button>
+              </div>
+            </div>
+
+            <div class="setup-step">
+              <h3>Respaldos diarios en la nube</h3>
+              <p class="muted" style="font-size:.85rem">
+                Cada día se crea un snapshot del estado de la base en una colección separada
+                de Firebase (<code>ortopedia_backups</code>). Mantiene los últimos ${CLOUD_BACKUP_MAX_DAYS} días.
+                Si la base principal se borra accidentalmente, puedes restaurar desde aquí.
+              </p>
+              <div id="cloudBackupList" class="muted" style="font-size:.85rem">Cargando lista de respaldos remotos…</div>
+              <div style="margin-top:8px">
+                <button class="btn ghost small" onclick="App.refreshCloudBackups()">🔄 Actualizar lista</button>
+                <button class="btn ghost small" onclick="App.forzarBackupHoy()">📤 Forzar respaldo de hoy</button>
+              </div>
+            </div>
+
+            <div class="setup-step">
+              <h3>Respaldo en Google Drive (opcional)</h3>
+              <p class="muted" style="font-size:.85rem">
+                Sube una copia diaria del JSON completo a tu Google Drive personal. Es una
+                <strong>segunda capa de respaldo</strong> independiente de Firebase — útil si quieres tener
+                el respaldo fuera del proyecto Firebase. Requiere configuración inicial (una sola vez).
+              </p>
+              <details style="margin-top:8px">
+                <summary style="cursor:pointer;font-weight:600">Cómo configurar (10 minutos, una sola vez)</summary>
+                <ol style="padding-left:20px;line-height:1.5;font-size:.85rem;margin-top:8px">
+                  <li>Entra a <a href="https://console.cloud.google.com/" target="_blank">console.cloud.google.com</a> con tu Gmail.</li>
+                  <li>Crea un proyecto nuevo (o usa el mismo de Firebase).</li>
+                  <li>En el menú lateral: <strong>APIs y servicios → Biblioteca</strong> → busca "Google Drive API" y actívala.</li>
+                  <li>Vuelve a <strong>APIs y servicios → Pantalla de consentimiento OAuth</strong>. Marca <em>External</em>, da un nombre a la app, agrega tu email como contacto y guarda.</li>
+                  <li>Ve a <strong>Credenciales → Crear credenciales → ID de cliente OAuth</strong>. Tipo: "Aplicación web".</li>
+                  <li>En <strong>Orígenes JavaScript autorizados</strong> agrega la URL donde abres la app (ej. <code>https://tudominio.netlify.app</code> o <code>http://localhost:8000</code>).</li>
+                  <li>Crea y copia el <strong>Client ID</strong> (termina en <code>.apps.googleusercontent.com</code>).</li>
+                  <li>Pégalo en el campo de abajo.</li>
+                </ol>
+              </details>
+              <div class="field" style="margin-top:8px;margin-bottom:0">
+                <label>Google OAuth Client ID</label>
+                <input id="driveClientIdInput" value="${escapeHtml(DriveBackup.getClientId())}"
+                  placeholder="XXXXX-XXXXX.apps.googleusercontent.com"
+                  onchange="App.guardarDriveClientId(this.value)">
+              </div>
+              <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                <div id="driveAuthStatus" class="muted" style="flex:1;font-size:.85rem">
+                  ${DriveBackup.isAuthorized()
+                    ? '<span style="color:#059669">✓ Autorizado</span> — los respaldos se suben diariamente'
+                    : DriveBackup.getClientId()
+                      ? '<span style="color:#92400e">Client ID configurado pero falta autorizar</span>'
+                      : '<span>Sin configurar</span>'}
+                </div>
+                ${DriveBackup.isAuthorized()
+                  ? `<button class="btn ghost small" onclick="App.subirBackupDriveAhora()">📤 Subir ahora</button>
+                     <button class="btn ghost small" onclick="App.listarBackupsDrive()">📂 Ver respaldos</button>
+                     <button class="btn ghost small" onclick="App.desautorizarDrive()">Desautorizar</button>`
+                  : `<button class="btn success small" onclick="App.autorizarDrive()">🔐 Autorizar Google Drive</button>`}
+              </div>
+              <div id="driveBackupList" style="margin-top:10px"></div>
+            </div>
+
+            <div class="setup-step">
               <h3>Catálogos del servicio</h3>
               <p class="muted" style="font-size:.85rem">Listas de diagnósticos, procedimientos, medicamentos, esquemas de egreso y cirujanos. Aparecen como sugerencias / plantillas al llenar pacientes y programas. Puedes agregar y quitar items.</p>
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
@@ -2541,12 +3115,18 @@ service cloud.firestore {
     match /apps/ortopedia {
       allow read, write: if true;
     }
+    match /ortopedia_backups/{fecha} {
+      allow read, write: if true;
+    }
   }
 }</div>
               <button class="copy-btn" onclick="App.copyText(\`rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     match /apps/ortopedia {
+      allow read, write: if true;
+    }
+    match /ortopedia_backups/{fecha} {
       allow read, write: if true;
     }
   }
@@ -2595,6 +3175,8 @@ service cloud.firestore {
       </div>
     `;
     document.getElementById('modalRoot').innerHTML = html;
+    // v3.23: cargar lista de respaldos en la nube en background
+    setTimeout(() => { try { this.refreshCloudBackups(); } catch(e){} }, 100);
   },
 
   setHospitalConfig(campo, valor) {
@@ -8048,6 +8630,187 @@ service cloud.firestore {
     };
     reader.readAsText(f);
     ev.target.value = '';
+  },
+
+  /* ---------- Backups locales (v3.23) ---------- */
+  crearBackupManual() {
+    Backups.guardar(State.data);
+    alert('Respaldo manual creado. Lista de respaldos actualizada.');
+    this.openSetup();
+  },
+
+  /* ---------- Backups en la nube (v3.23) ---------- */
+  async refreshCloudBackups() {
+    const cont = document.getElementById('cloudBackupList');
+    if (!cont) return;
+    cont.innerHTML = 'Cargando…';
+    if (!Sync.db) {
+      cont.innerHTML = '<em>Firebase no está conectado. Configura la sincronización primero.</em>';
+      return;
+    }
+    const lista = await CloudBackups.listar();
+    if (lista.length === 0) {
+      cont.innerHTML = '<em>No hay respaldos en la nube todavía. El primero se crea automáticamente al primer cambio del día.</em>';
+      return;
+    }
+    cont.innerHTML = lista.map(b => {
+      const r = b.resumen || {};
+      const t = b.timestamp ? new Date(b.timestamp).toLocaleString('es') : b.fecha;
+      return `<div class="card compact" style="margin-bottom:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <div style="flex:1;min-width:200px;font-size:.85rem">
+          <strong>${escapeHtml(b.fecha)}</strong> · ${escapeHtml(t)}
+          <div class="muted" style="font-size:.78rem">${r.pacientesActivos||0} activos · ${r.pacientes||0} totales · ${r.programas||0} programas · ${r.egresos||0} egresos · ${r.usuarios||0} usuarios${b.creadoPor?' · creado por '+escapeHtml(b.creadoPor):''}</div>
+        </div>
+        <button class="btn small" onclick="App.restaurarBackupNube('${b.fecha}')">Restaurar</button>
+      </div>`;
+    }).join('');
+  },
+
+  async restaurarBackupNube(fecha) {
+    if (!Sync.db) {
+      alert('Firebase no está conectado.');
+      return;
+    }
+    const restaurado = await CloudBackups.cargar(fecha);
+    if (!restaurado) { alert('No se pudo cargar ese respaldo.'); return; }
+    const r = {
+      pacientes: (restaurado.patients||[]).length,
+      activos: (restaurado.patients||[]).filter(p => !p.fechaEgreso).length,
+      programas: (restaurado.programas||[]).length,
+      egresos: (restaurado.egresos||[]).length,
+      usuarios: (restaurado.config && restaurado.config.usuarios ? restaurado.config.usuarios.length : 0)
+    };
+    const msg = `¿Restaurar el respaldo del ${fecha}?\n\n` +
+                `Contiene:\n` +
+                `  • ${r.pacientes} pacientes (${r.activos} activos)\n` +
+                `  • ${r.programas} programas\n` +
+                `  • ${r.egresos} egresos\n` +
+                `  • ${r.usuarios} usuarios\n\n` +
+                `Esto va a REEMPLAZAR los datos actuales (también en la nube). ` +
+                `Antes se guardará un respaldo local automático por si te arrepientes.`;
+    if (!confirm(msg)) return;
+    // Snapshot local defensivo
+    Backups.guardar(State.data);
+    State.data = restaurado;
+    State.save();
+    this.closeModal();
+    this.render();
+    alert('Respaldo restaurado y publicado a la nube. Los demás dispositivos lo recibirán en unos segundos.');
+  },
+
+  async forzarBackupHoy() {
+    CloudBackups._lastCheckedDay = null;
+    await CloudBackups.asegurarBackupDeHoy();
+    alert('Verificación de respaldo de hoy completada.');
+    this.refreshCloudBackups();
+  },
+
+  /* ---------- Google Drive (v3.23) ---------- */
+  guardarDriveClientId(id) {
+    DriveBackup.setClientId((id||'').trim());
+    this.openSetup();
+  },
+
+  async autorizarDrive() {
+    try {
+      await DriveBackup.autorizar();
+      alert('Autorización exitosa. Se va a subir el respaldo de hoy.');
+      try { await DriveBackup.subirBackupDeHoy(); } catch(e) { alert('Autorizado pero falló la primera subida: ' + e.message); }
+      this.openSetup();
+    } catch(e) {
+      alert('Error autorizando Google Drive:\n' + e.message);
+    }
+  },
+
+  desautorizarDrive() {
+    if (!confirm('¿Desautorizar el acceso a Google Drive? Ya no se subirán respaldos automáticamente.')) return;
+    DriveBackup.desautorizar();
+    this.openSetup();
+  },
+
+  async subirBackupDriveAhora() {
+    try {
+      DriveBackup._lastUploadDay = null;
+      const ok = await DriveBackup.subirBackupDeHoy();
+      alert(ok ? 'Respaldo subido a Google Drive.' : 'No se subió (datos vacíos o ya estaba subido).');
+    } catch(e) {
+      alert('Error subiendo a Drive:\n' + e.message);
+    }
+  },
+
+  async listarBackupsDrive() {
+    const cont = document.getElementById('driveBackupList');
+    if (!cont) return;
+    cont.innerHTML = '<em class="muted" style="font-size:.85rem">Cargando…</em>';
+    try {
+      const files = await DriveBackup.listar();
+      if (files.length === 0) {
+        cont.innerHTML = '<em class="muted" style="font-size:.85rem">No hay respaldos en tu carpeta de Drive.</em>';
+        return;
+      }
+      cont.innerHTML = files.map(f => `
+        <div class="card compact" style="margin-bottom:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <div style="flex:1;min-width:200px;font-size:.85rem">
+            <strong>${escapeHtml(f.name)}</strong>
+            <div class="muted" style="font-size:.78rem">${new Date(f.modifiedTime).toLocaleString('es')} · ${Math.round((f.size||0)/1024)} KB</div>
+          </div>
+          <button class="btn small" onclick="App.restaurarBackupDrive('${f.id}','${escapeHtml(f.name)}')">Restaurar</button>
+        </div>
+      `).join('');
+    } catch(e) {
+      cont.innerHTML = '<em class="muted" style="color:#dc2626">Error: ' + escapeHtml(e.message||'') + '</em>';
+    }
+  },
+
+  async restaurarBackupDrive(fileId, nombre) {
+    if (!confirm('¿Restaurar el respaldo "' + nombre + '"?\n\nEsto va a REEMPLAZAR los datos actuales. Antes se guardará un respaldo local automático.')) return;
+    try {
+      const wrap = await DriveBackup.descargar(fileId);
+      if (!wrap) { alert('No se pudo descargar el archivo.'); return; }
+      // El archivo puede tener formato {appVersion, data: {...}} (nuevo) o ser el dato directo (legacy/export manual)
+      const restaurado = wrap.data || wrap;
+      if (!restaurado.patients) { alert('Archivo no contiene datos válidos.'); return; }
+      Backups.guardar(State.data);
+      State.data = restaurado;
+      State.save();
+      this.closeModal();
+      this.render();
+      alert('Respaldo restaurado desde Google Drive.');
+    } catch(e) {
+      alert('Error restaurando: ' + e.message);
+    }
+  },
+
+  restaurarBackupLocal(timestamp, tipo) {
+    const restaurado = Backups.restaurar(timestamp, tipo);
+    if (!restaurado) {
+      alert('No se pudo cargar ese respaldo.');
+      return;
+    }
+    const r = {
+      pacientes: (restaurado.patients||[]).length,
+      activos: (restaurado.patients||[]).filter(p => !p.fechaEgreso).length,
+      programas: (restaurado.programas||[]).length,
+      egresos: (restaurado.egresos||[]).length,
+      usuarios: (restaurado.config && restaurado.config.usuarios ? restaurado.config.usuarios.length : 0)
+    };
+    const fecha = new Date(timestamp).toLocaleString('es');
+    const msg = `¿Restaurar el respaldo del ${fecha}?\n\n` +
+                `Contiene:\n` +
+                `  • ${r.pacientes} pacientes (${r.activos} activos)\n` +
+                `  • ${r.programas} programas\n` +
+                `  • ${r.egresos} egresos\n` +
+                `  • ${r.usuarios} usuarios\n\n` +
+                `Esto va a REEMPLAZAR los datos actuales (también en la nube cuando se sincronice). ` +
+                `Antes se va a crear un respaldo automático de los datos actuales por si te arrepientes.`;
+    if (!confirm(msg)) return;
+    // Snapshot defensivo de los datos actuales antes de sobrescribir
+    Backups.guardar(State.data);
+    State.data = restaurado;
+    State.save();
+    this.closeModal();
+    this.render();
+    alert('Respaldo restaurado. Si tienes Firebase configurado, los demás dispositivos recibirán esta versión en unos segundos.');
   }
 };
 
