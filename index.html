@@ -639,7 +639,7 @@
    Datos en localStorage; export/import JSON; sin backend.
    ========================================================= */
 
-const APP_VERSION = 'v3.20-evaluacion-preop-tipificada-2026-05-10';
+const APP_VERSION = 'v3.21-merge-config-sync-2026-05-14';
 const STORAGE_KEY = 'ortopedia_v1';
 const FB_CONFIG_KEY = 'ortopedia_fb_config_v1';
 const FB_DOC_PATH = 'apps/ortopedia';   // Documento único de Firestore
@@ -1542,6 +1542,77 @@ const Sync = {
     else localStorage.removeItem(FB_CONFIG_KEY);
   },
 
+  /* v3.21: Fusión de configuración remota + local por unión.
+     Evita pérdida de usuarios/catálogos cuando dos dispositivos guardan al mismo tiempo.
+     Estrategia:
+       - Usuarios: unión por nombre (case-insensitive). Los datos remotos ganan en caso de
+         match (rol más reciente). Los locales que no están en remoto se preservan.
+       - Catálogos de strings (diagnosticos, procedimientos, cirujanos, ubicaciones):
+         unión simple por string.
+       - Catálogos de objetos (medicamentos, esquemasEgreso, plantillasEvolucion): unión
+         por nombre/título.
+       - Resto de campos (hospitalNombre, servicio, etc.): el remoto gana. */
+  _mergeConfig(localCfg, remoteCfg) {
+    if (!remoteCfg || typeof remoteCfg !== 'object') return localCfg || {};
+    if (!localCfg || typeof localCfg !== 'object') return remoteCfg;
+    const merged = Object.assign({}, remoteCfg);
+
+    // --- usuarios ---
+    const lu = Array.isArray(localCfg.usuarios) ? localCfg.usuarios : [];
+    const ru = Array.isArray(remoteCfg.usuarios) ? remoteCfg.usuarios : [];
+    const setRemoto = new Set(ru.map(u => (u.nombre||'').toLowerCase()));
+    const extras = lu.filter(u => !setRemoto.has((u.nombre||'').toLowerCase()));
+    merged.usuarios = ru.concat(extras);
+
+    // --- catálogos ---
+    const lc = (localCfg.catalogos && typeof localCfg.catalogos === 'object') ? localCfg.catalogos : {};
+    const rc = (remoteCfg.catalogos && typeof remoteCfg.catalogos === 'object') ? remoteCfg.catalogos : {};
+    const mc = Object.assign({}, rc);
+    const unirStrings = (key) => {
+      const la = Array.isArray(lc[key]) ? lc[key] : [];
+      const ra = Array.isArray(rc[key]) ? rc[key] : [];
+      const set = new Set(ra.map(s => (s||'').toLowerCase()));
+      const ex = la.filter(s => !set.has((s||'').toLowerCase()));
+      mc[key] = ra.concat(ex);
+    };
+    const unirObjetos = (key, idFn) => {
+      const la = Array.isArray(lc[key]) ? lc[key] : [];
+      const ra = Array.isArray(rc[key]) ? rc[key] : [];
+      const set = new Set(ra.map(o => (idFn(o)||'').toLowerCase()));
+      const ex = la.filter(o => !set.has((idFn(o)||'').toLowerCase()));
+      mc[key] = ra.concat(ex);
+    };
+    unirStrings('diagnosticos');
+    unirStrings('procedimientos');
+    unirStrings('cirujanos');
+    unirStrings('ubicaciones');
+    unirObjetos('medicamentos', m => m.nombre);
+    unirObjetos('esquemasEgreso', e => e.nombre);
+    unirObjetos('plantillasEvolucion', t => (typeof t === 'string' ? t : (t.titulo || t.texto || '')));
+    merged.catalogos = mc;
+
+    return merged;
+  },
+
+  /* Comprueba si el config fusionado tiene ítems extra que el remoto no tenía.
+     Si es true, debemos re-publicar el documento para que esos ítems se propaguen. */
+  _configDiffersFromRemote(mergedCfg, remoteCfg) {
+    if (!mergedCfg || !remoteCfg) return false;
+    const lenU = (Array.isArray(mergedCfg.usuarios) ? mergedCfg.usuarios.length : 0);
+    const lenRU = (Array.isArray(remoteCfg.usuarios) ? remoteCfg.usuarios.length : 0);
+    if (lenU > lenRU) return true;
+    const mc = mergedCfg.catalogos || {};
+    const rc = remoteCfg.catalogos || {};
+    const keys = ['diagnosticos','procedimientos','cirujanos','ubicaciones',
+                  'medicamentos','esquemasEgreso','plantillasEvolucion'];
+    for (const k of keys) {
+      const lenL = (Array.isArray(mc[k]) ? mc[k].length : 0);
+      const lenR = (Array.isArray(rc[k]) ? rc[k].length : 0);
+      if (lenL > lenR) return true;
+    }
+    return false;
+  },
+
   setStatus(s, msg) {
     this.status = s;
     const el = document.getElementById('syncStatus');
@@ -1599,10 +1670,27 @@ const Sync = {
           }
           const remote = snap.exists ? snap.data() : null;
           if (remote && remote.patients) {
+            // v3.21: fusionar config (usuarios + catálogos) por unión para evitar
+            // pérdida por "last writer wins" cuando varios dispositivos guardan a la vez.
+            const remoteCfg = remote.config || {};
+            const localCfg = State.data.config || {};
+            const mergedConfig = Sync._mergeConfig(localCfg, remoteCfg);
+            // Detectar si la fusión añadió algo que no estaba en el remoto;
+            // si es así, hay que volver a subir el documento para no perder esos items.
+            const needsRepush = Sync._configDiffersFromRemote(mergedConfig, remoteCfg);
+
+            const newState = {
+              patients: remote.patients,
+              programas: remote.programas || [],
+              egresos: remote.egresos || [],
+              interconsultasEntrantes: remote.interconsultasEntrantes || [],
+              config: mergedConfig,
+              lastWrite: remote.lastWrite
+            };
             const localStr = JSON.stringify(State.data);
-            const remoteStr = JSON.stringify({ patients: remote.patients, programas: remote.programas || [], egresos: remote.egresos || [], interconsultasEntrantes: remote.interconsultasEntrantes || [], config: remote.config || State.data.config, lastWrite: remote.lastWrite });
-            if (localStr !== remoteStr) {
-              State.data = { patients: remote.patients, programas: remote.programas || [], egresos: remote.egresos || [], interconsultasEntrantes: remote.interconsultasEntrantes || [], config: remote.config || State.data.config, lastWrite: remote.lastWrite };
+            const newStr = JSON.stringify(newState);
+            if (localStr !== newStr) {
+              State.data = newState;
               State._migrar();
               try { localStorage.setItem(STORAGE_KEY, JSON.stringify(State.data)); } catch(e){}
               if (App.render) App.render();
@@ -1611,6 +1699,11 @@ const Sync = {
               } else if (App._currentModalId) {
                 App.closeModal();
               }
+            }
+            // Si la fusión recuperó usuarios/catálogos locales, re-publicar para que
+            // los demás dispositivos también los reciban.
+            if (needsRepush) {
+              this.scheduleSave();
             }
           } else if (snap && !snap.exists) {
             // Documento no existe; subir lo local
